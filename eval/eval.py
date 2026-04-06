@@ -581,10 +581,14 @@ if __name__ == "__main__":
     if args.n_test is not None and len(dataset) > args.n_test:
         dataset = torch.utils.data.Subset(dataset, range(args.n_test))
 
+    if dist.is_available() and dist.is_initialized():
+        sampler = CustomDistributedSampler(dataset, shuffle=False)
+    else:
+        sampler = None  # single-process fallback (e.g. Windows local dev)
     dataloader = DataLoader(
         dataset,
         batch_size=args.batch_size,
-        sampler=CustomDistributedSampler(dataset, shuffle=False),
+        sampler=sampler,
         collate_fn=collate_fn,
     )
 
