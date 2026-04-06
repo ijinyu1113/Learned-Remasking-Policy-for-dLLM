@@ -1,0 +1,2 @@
+run,dataset,block_length,checkpoint,temperature,accuracy_mean,accuracy_std,accuracy_min,accuracy_max,avg_steps_mean,avg_steps_std,avg_steps_min,avg_steps_max,avg_wall_time_mean,avg_wall_time_std,avg_wall_time_min,avg_wall_time_max,avg_effective_tokens_mean,avg_effective_tokens_std,avg_effective_tokens_min,avg_effective_tokens_max,num_seeds
+baseline-low_confidence-K32,gsm8k,32,baseline-low_confidence-K32,0.0,50.0,,50.0,50.0,32.0,,32.0,32.0,761.2323,,761.2323,761.2323,192.25,,192.25,192.25,1

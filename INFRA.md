@@ -72,7 +72,49 @@ If that produces a `*_generations.json` under `./eval_results/lowconf_smoke/`, i
 - [eval/pipeline.py](eval/pipeline.py) — multi-seed/multi-checkpoint orchestrator.
 - [configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_mixture.yaml](configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_mixture.yaml) — starting config.
 
-## Run each baseline (on the A100)
+## Run all baselines for the paper (on the A100)
+
+Per [plan §4](cs288_remasking_policy_plan.md), we need four baselines × four datasets (GSM8K, MATH500, HumanEval, MBPP) × multiple seeds. Three are no-train heuristics; the fourth requires training the 2-way policy first. Single script:
+
+```bash
+CFG=configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_mixture.yaml
+DATASETS=gsm8k,math,humaneval,mbpp
+SEEDS=42,43,44
+
+# --- Heuristic baselines (no training) ---
+for NAME in baseline-random-K32 baseline-low_confidence-K32 baseline-fastdllm-t0.7; do
+  mkdir -p ./outputs/$NAME/checkpoint-$NAME
+  touch     ./outputs/$NAME/checkpoint-$NAME/.baseline_marker
+  python -m eval.pipeline ./outputs/$NAME $CFG \
+    --checkpoints self \
+    --datasets $DATASETS \
+    --seeds $SEEDS \
+    --temperatures 0.0 \
+    --save_path ./eval_results/$NAME
+done
+
+# --- Learned 2-way policy (Jazbec et al.) — train, then eval ---
+python -m train.train --config $CFG
+# checkpoints land in the output_dir set inside the YAML; assume ./outputs/policy2way
+
+python -m eval.pipeline ./outputs/policy2way $CFG \
+  --checkpoints last \
+  --datasets $DATASETS \
+  --seeds $SEEDS \
+  --temperatures 1.0 \
+  --sampling_mode bernoulli-argmax \
+  --save_path ./eval_results/policy2way
+```
+
+Notes:
+
+- **`K<N>` / `t<x>` in baseline names** — `K32` = 32 denoising steps; `t0.7` = Fast-dLLM threshold 0.7. The parser at [eval/eval.py:70](eval/eval.py#L70) accepts both. To plot the Pareto frontier (plan §5.1), sweep K for `random`/`low_confidence` (e.g. K=8,16,32,64) and t for `fastdllm` (e.g. t=0.5,0.7,0.9) — just add more entries to the loop.
+- **Temperature** — heuristics ignore policy temperature; `--temperatures 0.0` is correct and faster (pipeline creates one output dir per temperature). The trained 2-way policy uses `1.0` per upstream's recommendation for BL=32.
+- **Cost** — full GSM8K (1319) + MATH500 (500) + HumanEval (164) + MBPP (~500) × 32 steps × 8B forward × 3 seeds × 4 baselines dominates infra cost. Budget ~half a day per heuristic baseline on a single A100, ~1 day for the trained policy (train + eval). Don't leave the VM idle.
+- **Iteration** — add `--n_test 50` while debugging, drop it for paper numbers.
+- **Results** — `eval.pipeline` auto-runs `eval.aggregate_results` and dumps a CSV under `--save_path`. Person C reads from those CSVs; commit them to `results/baselines/`.
+
+## Run a single baseline (on the A100)
 
 All four use the same eval pipeline with magic checkpoint names parsed at [eval/eval.py:70](eval/eval.py#L70). The naming convention: `baseline-<method>[-K<steps>][-t<thres>]`. Pre-create the marker file for each.
 

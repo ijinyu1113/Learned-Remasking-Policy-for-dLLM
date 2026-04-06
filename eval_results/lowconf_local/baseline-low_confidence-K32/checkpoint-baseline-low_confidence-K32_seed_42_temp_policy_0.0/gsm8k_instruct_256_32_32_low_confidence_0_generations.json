@@ -1,0 +1,48 @@
+{
+  "generations": [
+    {
+      "question": "Janet\u2019s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?",
+      "prompt_input": "<|startoftext|><|start_header_id|>user<|end_header_id|>\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{}.\nRespond in the following format:\n<reasoning>\nYour reasoning here\n</reasoning>\n<answer>\n\\boxed{...}\n</answer>\n\nJanet\u2019s ducks lay 16 eggs per day. She eats three for breakfast every morning and bakes muffins for her friends every day with four. She sells the remainder at the farmers' market daily for $2 per fresh duck egg. How much in dollars does she make every day at the farmers' market?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<reasoning>",
+      "generations": "\nTo determine how much  Janet makes every day day day at the at the farmers' market, we need to follow these steps:\n\n1. Calculate the total number of eggs laid by Janet's ducks per day.\n2. Subtract the number of eggs Janet eats for breakfast and the number number the the eggs she bakes for for her friends\n.\n3. Multiply the number of eggs eggs at the price price per the to the the the.\n\n1. let's\n the total number of eggs laid by the ducks per day is 16.\n\n2. Sub eats 3 eggs for breakfast and akes  for her her her friends with 4 eggs.\n   \n    3   3 4  4                                                                      9  9\n</reasoning>\n<answer>\n\\boxed{8}\n</answer>",
+      "ground_truth": 18.0,
+      "steps": 32,
+      "wall_time": 806.488742351532
+    },
+    {
+      "question": "A robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?",
+      "prompt_input": "<|startoftext|><|start_header_id|>user<|end_header_id|>\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{}.\nRespond in the following format:\n<reasoning>\nYour reasoning here\n</reasoning>\n<answer>\n\\boxed{...}\n</answer>\n\nA robe takes 2 bolts of blue fiber and half that much white fiber.  How many bolts in total does it take?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<reasoning>",
+      "generations": "\nThe determine the total number of of of bolts required for the the, we need to add the amount of blue blue and white fiber of. The. states that the robe takes 2 of of of blue of and half half half half of much white of of. half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half half\n</reasoning>\n<answer>\n\\boxed{3}\n</answer>",
+      "ground_truth": 3.0,
+      "steps": 32,
+      "wall_time": 711.5235569477081
+    },
+    {
+      "question": "Josh decides to try flipping a house.  He buys a house for $80,000 and then puts in $50,000 in repairs.  This increased the value of the house by 150%.  How much profit did he make?",
+      "prompt_input": "<|startoftext|><|start_header_id|>user<|end_header_id|>\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{}.\nRespond in the following format:\n<reasoning>\nYour reasoning here\n</reasoning>\n<answer>\n\\boxed{...}\n</answer>\n\nJosh decides to try flipping a house.  He buys a house for $80,000 and then puts in $50,000 in repairs.  This increased the value of the house by 150%.  How much profit did he make?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<reasoning>",
+      "generations": "\nTo determine the's profit, we first spent $80,000 on the house and then added 100000 in repairs. This means he bought the house for 80000+50000=100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n</</ing>\n<answer>\n\\boxed{100000}\n</answer>",
+      "ground_truth": 70000.0,
+      "steps": 32,
+      "wall_time": 795.6178455352783
+    },
+    {
+      "question": "James decides to run 3 sprints 3 times a week.  He runs 60 meters each sprint.  How many total meters does he run a week?",
+      "prompt_input": "<|startoftext|><|start_header_id|>user<|end_header_id|>\n\nYou are a math expert. You will be given a question to solve. Solve it step by step. Wrap the final answer in a \\boxed{}.\nRespond in the following format:\n<reasoning>\nYour reasoning here\n</reasoning>\n<answer>\n\\boxed{...}\n</answer>\n\nJames decides to run 3 sprints 3 times a week.  He runs 60 meters each sprint.  How many total meters does he run a week?<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n<reasoning>",
+      "generations": "\nTo determine the total distance James runs in a week, we need to break down the problem into smaller, manageable steps.\n\n1. **Calculate the distance James runs in one day:**\n   - James runs 3 sprints each day.\n   - Each sprint is 60 meters.\n   - Therefore, the distance distance one day is \\(33 \\ {0}} \\\n\n \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\ \\\n\n</inging>\n<answer>\n\\boxed{540}\n</answer>",
+      "ground_truth": 540.0,
+      "steps": 32,
+      "wall_time": 731.2988886833191
+    }
+  ],
+  "metrics": {
+    "wall_time": 761.2322583794594,
+    "total_processed": 4
+  },
+  "model_path": "GSAI-ML/LLaDA-8B-Instruct",
+  "gen_length": 256,
+  "diffusion_steps": 32,
+  "block_length": 32,
+  "remasking": "low_confidence",
+  "policy_path": "outputs\\baseline-low_confidence-K32\\checkpoint-baseline-low_confidence-K32\\.baseline_marker",
+  "thres": 0.7,
+  "n_test": 4
+}

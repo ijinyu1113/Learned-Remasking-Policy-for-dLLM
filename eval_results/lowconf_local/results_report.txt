@@ -1,0 +1,29 @@
+Evaluation Results Summary
+==================================================
+
+Total evaluations: 1
+Datasets evaluated: 1 ['gsm8k']
+Checkpoints evaluated: 1
+Temperatures evaluated: 1 [np.float64(0.0)]
+Seeds per configuration: 1
+Configuration: BL=32, L=256
+Remasking: low_confidence, Sampling: bernoulli
+
+Best Results by Dataset:
+--------------------------------------------------
+
+GSM8K:
+  Checkpoint: baseline-low_confidence-K32
+  Temperature: 0.00
+  Seed: 42
+  Accuracy: 50.00%
+  Avg Steps: 32.0
+  Avg Wall Time: 761.232s
+
+
+
+Results for GSM8K, BL=32:
+-----------------------------------------------------------------------------------------------
+                 Run      Checkpoint   Temp     Accuracy      Std  Seeds            NFEs         Time(s)          Tokens
+-----------------------------------------------------------------------------------------------
+baseline-low_confidence-K32 baseline-low_confidence-K32   0.00    50.00% +/-  nan      1   32.0 +/-  nan 761.232 +/-  nan  192.2 +/-  nan
