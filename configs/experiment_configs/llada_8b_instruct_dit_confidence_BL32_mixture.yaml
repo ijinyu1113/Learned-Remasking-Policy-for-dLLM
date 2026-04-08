@@ -8,7 +8,7 @@ torch_dtype: bfloat16
 load_in_4bit: false
 model_path: GSAI-ML/LLaDA-8B-Instruct
 
-attn_implementation: flash_attention_2
+attn_implementation: sdpa
 
 # GRPOConfig
 dataset: gsm8k_and_math
@@ -57,7 +57,7 @@ save_total_limit: 500
 max_completion_length: 256
 max_prompt_length: 200
 block_length: 32
-generation_batch_size: 128
+generation_batch_size: 16
 remasking: policy
 beta: 0.
 epsilon: 0.5

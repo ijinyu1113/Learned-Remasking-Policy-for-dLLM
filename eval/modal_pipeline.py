@@ -42,8 +42,8 @@ image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install("git")
     .pip_install(
-        "torch==2.4.1",
-        extra_index_url="https://download.pytorch.org/whl/cu121",
+        "torch==2.6.0",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
     )
     .add_local_dir(".", remote_path="/root/repo", copy=True, ignore=["*.pyc", "__pycache__", ".git", "*.egg-info", "outputs", "eval_results"])
     .run_commands("cd /root/repo && pip install --no-deps -e .")

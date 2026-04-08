@@ -17,20 +17,19 @@ import modal
 # Modal image
 image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.1.1-devel-ubuntu22.04",
+        "nvidia/cuda:12.4.1-devel-ubuntu22.04",
         add_python="3.12",
     )
     .apt_install("git")
     .pip_install(
-        "torch==2.4.1",
-        extra_index_url="https://download.pytorch.org/whl/cu121",
+        "torch==2.6.0",
+        extra_index_url="https://download.pytorch.org/whl/cu124",
     )
     .pip_install(
         "packaging",
         "ninja",
         "numpy>=1.26.0",
     )
-    .run_commands("pip install wheel setuptools && pip install flash-attn --no-build-isolation")
     .add_local_dir(".", remote_path="/root/repo", copy=True, ignore=["*.pyc", "__pycache__", ".git", "*.egg-info", "outputs", "eval_results"])
     .run_commands("cd /root/repo && pip install --no-deps -e .")
     .pip_install(
@@ -89,8 +88,9 @@ def run_train(
     import subprocess
     import json
     from datetime import datetime, timezone
-
+ 
     os.chdir("/root/repo")
+    os.environ["TORCHDYNAMO_DISABLE"] = "1"
 
     # Ensure output directory exists on the persistent volume
     if not output_dir.startswith("s3://"):

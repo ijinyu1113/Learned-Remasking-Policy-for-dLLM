@@ -6,6 +6,7 @@
 import os
 import tempfile
 from contextlib import nullcontext
+from pathlib import Path
 
 import accelerate
 import torch
@@ -258,6 +259,16 @@ def main(grpo_config, model_config):
                 print(
                     f"=== Auto-resume: found {latest}, downloaded to {resume_from} ==="
                 )
+        else:
+            # Auto-detect latest local checkpoint
+            ckpt_dirs = [
+                d for d in Path(local_output_dir).iterdir()
+                if d.is_dir() and d.name.startswith("checkpoint-") and d.name.split("-")[-1].isdigit()
+            ] if Path(local_output_dir).exists() else []
+            if ckpt_dirs:
+                latest = max(ckpt_dirs, key=lambda d: int(d.name.split("-")[-1]))
+                resume_from = str(latest)
+                print(f"=== Auto-resume: found {latest.name}, resuming from {resume_from} ===")
 
         trainer = Trainer(
             args=grpo_config,
