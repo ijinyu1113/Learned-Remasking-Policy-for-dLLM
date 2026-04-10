@@ -22,6 +22,9 @@ class GenerationResult(NamedTuple):
     policy_inputs: tuple[torch.Tensor, ...] | None = None
     still_masked: torch.Tensor | None = None  # (B,)
 
+    # Trajectory capture (None unless record_trajectory=True)
+    trajectory: list | None = None  # list of per-step dicts, see generate_unified docstring
+
 
 def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     if temperature == 0.0:
@@ -51,7 +54,14 @@ def generate_unified(
     temperature_policy: float = 1.0,
     full_context: bool = False,
     confidences_top_p: int = 1,
+    record_trajectory: bool = False,
 ) -> GenerationResult:
+    """
+    If record_trajectory=True, GenerationResult.trajectory is a list of dicts, one per
+    denoising step, each with keys: step (int), block (int), x (LongTensor B,L+P clone of
+    sequence BEFORE this step's unmask), x0 (LongTensor B,L predicted tokens), unmask
+    (BoolTensor B,L positions chosen to commit), confidence (FloatTensor B,L max prob).
+    """
     if remasking == "policy":
         if policy is None:
             raise ValueError("policy must be provided for remasking='policy'")
@@ -87,6 +97,8 @@ def generate_unified(
     # Strategy-specific state
     record_policy_data = policy is not None
     sampling_history = [] if record_policy_data else None
+    trajectory = [] if record_trajectory else None
+    global_step = 0
 
     max_steps = L
     if remasking in ["low_confidence", "random"]:
@@ -199,6 +211,18 @@ def generate_unified(
                     remasking,
                 )
 
+            # Capture trajectory BEFORE applying unmask, so x reflects pre-step state
+            if record_trajectory:
+                trajectory.append({
+                    "step": global_step,
+                    "block": num_block,
+                    "x": x.detach().clone().cpu(),
+                    "x0": x0.detach().clone().cpu(),
+                    "unmask": unmask.detach().clone().cpu(),
+                    "confidence": probs.max(dim=-1).values.detach().clone().cpu(),
+                })
+                global_step += 1
+
             # Apply unmasking
             x[:, prompt_L:] = torch.where(unmask, x0, generation_part)
 
@@ -237,11 +261,13 @@ def generate_unified(
             sampling_masks=sampling_masks,
             policy_inputs=policy_inputs_result,
             still_masked=still_masked,
+            trajectory=trajectory,
         )
     else:
         return GenerationResult(
             sequences=x,
             steps_taken=steps_taken,
+            trajectory=trajectory,
         )
 
 

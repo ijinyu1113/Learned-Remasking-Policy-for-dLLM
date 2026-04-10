@@ -48,7 +48,7 @@ class MBPPDataset(torch.utils.data.Dataset):
 
         formatted_examples = []
         for example in few_shot_examples:
-            text = example["text"]
+            text = example.get("text", example.get("prompt", ""))
             code = example["code"]
             test_list = example["test_list"]
             # Format matching lm-eval:
@@ -89,7 +89,7 @@ class MBPPDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         item = self.dataset[self.subsample[idx].item()]
-        text = item["text"]  # Task description
+        text = item.get("text", item.get("prompt", ""))  # Task description
         task_id = item["task_id"]
         test_list = item["test_list"]  # List of test cases (assertions)
 
