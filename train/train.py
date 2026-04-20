@@ -101,6 +101,19 @@ def main(grpo_config, model_config):
         )
         assert grpo_config.block_length == 256
         assert grpo_config.policy_full_context
+        assert grpo_config.sampling_mode != "three_way", (
+            "Expert Steering is not supported with 3-way (three_way) sampling mode."
+        )
+
+    # Consistency check between sampling_mode and policy head arity
+    if grpo_config.sampling_mode == "three_way":
+        assert grpo_config.num_policy_actions == 3, (
+            "sampling_mode='three_way' requires num_policy_actions=3"
+        )
+    else:
+        assert grpo_config.num_policy_actions == 1, (
+            f"sampling_mode='{grpo_config.sampling_mode}' requires num_policy_actions=1"
+        )
 
     if grpo_config.dataset in {"mbpp", "humaneval"}:
         raise ValueError(
@@ -185,6 +198,7 @@ def main(grpo_config, model_config):
             num_blocks=grpo_config.policy_num_blocks,
             smart_init=grpo_config.policy_smart_init,
             time_period=grpo_config.policy_time_period,
+            num_actions=grpo_config.num_policy_actions,
         ).to(device)
 
     elif grpo_config.policy_type == "dit_confidence":
@@ -201,6 +215,7 @@ def main(grpo_config, model_config):
             confidences_top_p=grpo_config.confidences_top_p,
             num_blocks=grpo_config.policy_num_blocks,
             time_period=grpo_config.policy_time_period,
+            num_actions=grpo_config.num_policy_actions,
         ).to(device)
     else:
         raise ValueError(

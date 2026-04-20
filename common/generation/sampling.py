@@ -96,6 +96,92 @@ def plackett_luce_batch_loglik(
     return log_probs.sum(dim=-1)  # (*B,)
 
 
+# ==================================================================
+# 3-way categorical action sampling (unmask / keep / remask)
+# Convention: action index 0=UNMASK, 1=KEEP, 2=REMASK
+# ==================================================================
+
+ACTION_UNMASK = 0
+ACTION_KEEP = 1
+ACTION_REMASK = 2
+NUM_3WAY_ACTIONS = 3
+
+
+def categorical_sample(
+    logits: torch.Tensor,
+    mask_index: torch.Tensor,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Sample per-position categorical actions for the 3-way policy.
+
+    :param logits: (*B, L, A) action logits; invalid actions should already be set to -inf.
+    :param mask_index: (*B, L) positions where the policy is allowed to take a non-trivial action.
+        At positions where mask_index is False, KEEP is deterministically returned.
+    :param dtype: optional compute dtype.
+    :return: (*B, L) int64 action indices in [0, A).
+    """
+    if dtype is not None:
+        logits = logits.to(dtype=dtype)
+    *B, L, A = logits.shape
+    probs = torch.softmax(logits, dim=-1)
+    # multinomial needs a 2D tensor
+    flat_probs = probs.reshape(-1, A)
+    # Guard against all -inf rows (no valid action) -- force KEEP there
+    row_sum = flat_probs.sum(dim=-1)
+    bad_rows = row_sum <= 0
+    if bad_rows.any():
+        fallback = torch.zeros_like(flat_probs)
+        fallback[:, ACTION_KEEP] = 1.0
+        flat_probs = torch.where(bad_rows.unsqueeze(-1), fallback, flat_probs)
+    flat_actions = torch.multinomial(flat_probs, num_samples=1).squeeze(-1)
+    actions = flat_actions.view(*B, L)
+    # Positions not in mask_index are forced to KEEP
+    actions = torch.where(mask_index, actions, torch.full_like(actions, ACTION_KEEP))
+    return actions.long()
+
+
+def categorical_batch_loglik(
+    samples: torch.Tensor,
+    utilities: torch.Tensor,
+    mask_index: torch.Tensor,
+    dtype: torch.dtype | None = None,
+) -> torch.Tensor:
+    """Per-batch log-likelihood of sampled 3-way actions.
+
+    :param samples: (*B, L) int64 action indices.
+    :param utilities: (*B, L, A) action logits (invalid actions should be -inf).
+    :param mask_index: (*B, L) bool indicating which positions contribute to the likelihood.
+    :param dtype: optional compute dtype.
+    :return: (*B,) log-likelihood per batch item.
+    """
+    if dtype is not None:
+        utilities = utilities.to(dtype=dtype)
+    # log_softmax handles -inf gracefully
+    log_probs = torch.log_softmax(utilities, dim=-1)  # (*B, L, A)
+    # Gather the log-prob of the sampled action
+    gathered = torch.gather(
+        log_probs, dim=-1, index=samples.unsqueeze(-1).clamp(min=0)
+    ).squeeze(-1)  # (*B, L)
+    # Replace any NaNs that can arise if an entire row is -inf (no valid actions)
+    gathered = torch.nan_to_num(gathered, nan=0.0, posinf=0.0, neginf=-1e9)
+    gathered = gathered * mask_index
+    return gathered.sum(dim=-1)
+
+
+def categorical_entropy(
+    logits: torch.Tensor,
+    mask_index: torch.Tensor,
+) -> torch.Tensor:
+    """Mean categorical entropy over positions where mask_index is True."""
+    log_probs = torch.log_softmax(logits, dim=-1)
+    probs = log_probs.exp()
+    # -sum(p log p), guarding for -inf rows
+    ent = -(probs * torch.nan_to_num(log_probs, neginf=0.0)).sum(dim=-1)  # (*B, L)
+    active = mask_index.float()
+    denom = active.sum().clamp(min=1.0)
+    return (ent * active).sum() / denom
+
+
 def bernoulli_batch_loglik(
     samples: torch.Tensor,
     utilities: torch.Tensor,

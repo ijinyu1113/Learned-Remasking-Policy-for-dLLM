@@ -537,6 +537,7 @@ if __name__ == "__main__":
                 num_blocks=config.policy_num_blocks,
                 smart_init=config.policy_smart_init,
                 time_period=config.policy_time_period,
+                num_actions=config.num_policy_actions,
             ).to(device)
         elif config.policy_type == "dit_confidence":
             hidden_dim = config.policy_hidden_dim or 128
@@ -552,6 +553,7 @@ if __name__ == "__main__":
                 confidences_top_p=config.confidences_top_p,
                 num_blocks=config.policy_num_blocks,
                 time_period=config.policy_time_period,
+                num_actions=config.num_policy_actions,
             ).to(device)
         else:
             raise ValueError(

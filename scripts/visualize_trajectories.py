@@ -68,14 +68,24 @@ def render_step_html(tokenizer, step, prev_step, prompt_L, mask_id):
     conf = step["confidence"][0].tolist()  # (L,)
     unmask = step["unmask"][0].tolist()  # (L,)
     x0 = step["x0"][0].tolist()  # (L,)
+    remask = step.get("remask")
+    remask_list = remask[0].tolist() if remask is not None else [False] * len(gen)
 
     # Tokens that were masked before this step but committed at this step
     just_committed = set(i for i, u in enumerate(unmask) if u)
+    just_remasked = set(i for i, r in enumerate(remask_list) if r)
 
     parts = []
     for i, tok in enumerate(gen):
         c = conf[i]
-        if i in just_committed:
+        if i in just_remasked:
+            # Show the pre-remask token with a red strikethrough marker
+            text = tokenizer.decode([tok], skip_special_tokens=False)
+            text = html.escape(text).replace("\n", "↵")
+            parts.append(
+                f'<span class="remasked" title="conf_before={c:.3f}">✗{text}</span>'
+            )
+        elif i in just_committed:
             # Show the predicted token (x0) — that's what's about to be committed
             text = tokenizer.decode([x0[i]], skip_special_tokens=False)
             text = html.escape(text).replace("\n", "↵")
@@ -104,6 +114,7 @@ def render_html(tokenizer, results_by_policy, prompt_L, mask_id, prompt_text, ou
     .mask { color:#444; }
     .kept { color:#aaa; }
     .just { color:#fff; background:#2a6; padding:0 1px; border-radius:2px; }
+    .remasked { color:#fff; background:#c44; padding:0 1px; border-radius:2px; text-decoration:line-through; }
     .final { color:#9af; }
     """
     html_parts = [
@@ -142,15 +153,15 @@ def maybe_load_policy(args, model, device):
         raise ValueError("--policy_config and --policy_ckpt required when 'policy' is in --policies")
     # Lazy import to avoid pulling training deps for the no-policy case
     from omegaconf import OmegaConf
-    from common.policy.dit_confidence_policy import DiTConfidencePolicy
-    from common.policy.dit_hidden_state_policy import DiTHiddenStatePolicy
+    from common.models.policy import DiTConfidencePolicy, DiTHiddenStatePolicy, PolicyHFWrapper
     cfg = OmegaConf.load(args.policy_config)
     grpo = cfg.grpo if "grpo" in cfg else cfg
     ptype = grpo.policy_type
+    num_actions = int(grpo.get("num_policy_actions", 1) or 1)
     if ptype == "dit_confidence":
         hidden_dim = grpo.get("policy_hidden_dim", 128) or 128
         ff = grpo.get("policy_feedforward_dim", None) or 4 * hidden_dim
-        policy = DiTConfidencePolicy(
+        core = DiTConfidencePolicy(
             hidden_dim=hidden_dim,
             feedforward_dim=ff,
             num_heads=grpo.policy_num_heads,
@@ -159,29 +170,35 @@ def maybe_load_policy(args, model, device):
             time_embed_dim=grpo.policy_time_embed_dim,
             time_period=grpo.get("policy_time_period", 1.0),
             confidences_top_p=grpo.get("confidences_top_p", 1),
+            num_actions=num_actions,
         ).to(device)
     elif ptype == "dit_hidden":
-        policy = DiTHiddenStatePolicy(
+        core = DiTHiddenStatePolicy(
             dllm=model,
             time_embed_dim=grpo.policy_time_embed_dim,
             num_blocks=grpo.policy_num_blocks,
-            smart_init=grpo.get("policy_smart_init", False),
+            smart_init=grpo.get("policy_smart_init", None),
             time_period=grpo.get("policy_time_period", 1.0),
+            num_actions=num_actions,
         ).to(device)
     else:
         raise ValueError(f"Unknown policy_type: {ptype}")
-    # Load weights
+    policy = PolicyHFWrapper(core, ptype).to(device)
+    # Load weights (safetensors or torch)
     ckpt_path = args.policy_ckpt
     if os.path.isdir(ckpt_path):
-        # try a few common filenames
-        for fname in ("policy.pt", "pytorch_model.bin", "model.safetensors"):
+        for fname in ("model.safetensors", "policy.pt", "pytorch_model.bin"):
             cand = os.path.join(ckpt_path, fname)
             if os.path.exists(cand):
                 ckpt_path = cand
                 break
-    state = torch.load(ckpt_path, map_location=device)
-    if isinstance(state, dict) and "state_dict" in state:
-        state = state["state_dict"]
+    if ckpt_path.endswith(".safetensors"):
+        from safetensors.torch import load_file
+        state = load_file(ckpt_path)
+    else:
+        state = torch.load(ckpt_path, map_location=device)
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
     policy.load_state_dict(state, strict=False)
     policy.eval()
     return policy

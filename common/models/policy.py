@@ -84,12 +84,14 @@ class DiTHiddenStatePolicy(nn.Module):
         smart_init: float | None = None,
         num_blocks: int = 1,
         time_period: float = 1,
+        num_actions: int = 1,
     ):
         super().__init__()
         self.hidden_dim = dllm.config.hidden_size
         self.time_embed_dim = time_embed_dim
         self.time_period = time_period
         self.num_blocks = num_blocks
+        self.num_actions = num_actions
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, self.hidden_dim),
@@ -120,7 +122,7 @@ class DiTHiddenStatePolicy(nn.Module):
                 for i in range(num_blocks)
             ]
         )
-        self.output_proj = nn.Linear(self.hidden_dim, 1)
+        self.output_proj = nn.Linear(self.hidden_dim, num_actions)
 
         if smart_init is not None:
             self.apply_smart_init(smart_init)
@@ -134,7 +136,19 @@ class DiTHiddenStatePolicy(nn.Module):
             for linear in self.ada_linears:
                 linear.weight.data.zero_()
                 linear.bias.data.zero_()
-            self.output_proj.bias.data.fill_(target_logit)
+            if self.num_actions == 1:
+                self.output_proj.bias.data.fill_(target_logit)
+            elif self.num_actions == 3:
+                # 3-way convention: [UNMASK, KEEP, REMASK]
+                # target_logit controls unmask bias; remask is heavily negative so the
+                # policy almost never remasks at init (safer cold-start).
+                self.output_proj.bias.data = torch.tensor(
+                    [target_logit, 0.0, -10.0],
+                    dtype=self.output_proj.bias.dtype,
+                    device=self.output_proj.bias.device,
+                )
+            else:
+                raise ValueError(f"Unsupported num_actions={self.num_actions}")
 
     def forward(
         self,
@@ -180,8 +194,9 @@ class DiTHiddenStatePolicy(nn.Module):
         x_flat = self.norms[-1](x_flat) * (1 + scale) + bias
 
         x = x_flat.view(original_shape)
-        raw_logits = self.output_proj(x).squeeze(-1)
-
+        raw_logits = self.output_proj(x)  # (*B, L, num_actions)
+        if self.num_actions == 1:
+            return raw_logits.squeeze(-1)  # (*B, L)
         return raw_logits
 
 
@@ -197,6 +212,7 @@ class DiTConfidencePolicy(nn.Module):
         smart_init: float | None = None,
         num_blocks: int = 1,
         time_period: float = 1,
+        num_actions: int = 1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -204,6 +220,7 @@ class DiTConfidencePolicy(nn.Module):
         self.time_period = time_period
         self.num_blocks = num_blocks
         self.confidences_top_p = confidences_top_p
+        self.num_actions = num_actions
 
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, self.hidden_dim),
@@ -228,7 +245,7 @@ class DiTConfidencePolicy(nn.Module):
             ]
         )
         self.final_norm = nn.LayerNorm(self.hidden_dim)
-        self.output_proj = nn.Linear(self.hidden_dim, 1)
+        self.output_proj = nn.Linear(self.hidden_dim, num_actions)
 
         if smart_init is not None:
             self.apply_smart_init(smart_init)
@@ -250,8 +267,17 @@ class DiTConfidencePolicy(nn.Module):
                 block.ada_conditioning.weight.data.zero_()
                 block.ada_conditioning.bias.data.zero_()
 
-            # Initialize output_proj bias to target mean
-            self.output_proj.bias.data.fill_(target_logit)
+            if self.num_actions == 1:
+                self.output_proj.bias.data.fill_(target_logit)
+            elif self.num_actions == 3:
+                # 3-way convention: [UNMASK, KEEP, REMASK]
+                self.output_proj.bias.data = torch.tensor(
+                    [target_logit, 0.0, -10.0],
+                    dtype=self.output_proj.bias.dtype,
+                    device=self.output_proj.bias.device,
+                )
+            else:
+                raise ValueError(f"Unsupported num_actions={self.num_actions}")
 
     def forward(
         self,
@@ -294,6 +320,7 @@ class DiTConfidencePolicy(nn.Module):
 
         # Predict logits
         x = self.final_norm(x)
-        raw_logits = self.output_proj(x).squeeze(-1)
-
+        raw_logits = self.output_proj(x)  # (*B, L, num_actions)
+        if self.num_actions == 1:
+            return raw_logits.squeeze(-1)
         return raw_logits

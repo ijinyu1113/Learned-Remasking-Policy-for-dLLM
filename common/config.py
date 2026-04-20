@@ -146,7 +146,18 @@ class Config(GRPOConfig):
     sampling_mode: str = field(
         default="bernoulli",
         metadata={
-            "help": "Type of sampling strategy to use. Options: ['bernoulli', 'bernoulli-argmax', 'dpls']."
+            "help": "Type of sampling strategy to use. Options: "
+            "['bernoulli', 'bernoulli-argmax', 'dpls', 'three_way']. "
+            "'three_way' runs the 3-action (unmask/keep/remask) categorical policy."
+        },
+    )
+
+    num_policy_actions: int = field(
+        default=1,
+        metadata={
+            "help": "Policy output arity. 1 = 2-way Bernoulli (unmask/keep). "
+            "3 = 3-way Categorical (unmask/keep/remask). Must be consistent with "
+            "sampling_mode ('three_way' requires 3)."
         },
     )
 

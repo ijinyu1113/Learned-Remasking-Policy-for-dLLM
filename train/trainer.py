@@ -33,7 +33,11 @@ from trl.trainer.grpo_trainer import GRPOTrainer
 from trl.trainer.utils import print_prompt_completions_sample
 
 from common.generation.generation import generate_unified
+from common.generation.sampling import ACTION_REMASK
+from common.generation.sampling import ACTION_UNMASK
 from common.generation.sampling import bernoulli_batch_loglik
+from common.generation.sampling import categorical_batch_loglik
+from common.generation.sampling import categorical_entropy
 from common.generation.sampling import dpls_batch_loglik
 from common.s3 import S3UploadCallback
 
@@ -387,6 +391,16 @@ class Trainer(GRPOTrainer):
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
             )
+        elif sampling_mode == "three_way":
+            # Re-apply the action-validity mask to the freshly-computed logits.
+            # During rollout we stored constrained logits on the old-policy side; here
+            # we reconstruct the same constraints from the sampled state.
+            lls = categorical_batch_loglik(
+                samples=samples,
+                utilities=logits,
+                mask_index=sampling_masks,
+                dtype=self.args.loglikelihood_dtype,
+            )
         else:
             raise ValueError(f"Unexpected {sampling_mode=}")
 
@@ -410,6 +424,8 @@ class Trainer(GRPOTrainer):
                 entropy = -(probs * torch.log(probs_clamped)).sum(dim=-1)
                 active_mask = sampling_masks.any(dim=-1).float()
                 entropy = (entropy * active_mask).sum() / active_mask.sum()
+            elif sampling_mode == "three_way":
+                entropy = categorical_entropy(logits, mask_index=sampling_masks)
 
         del logits
         torch.cuda.empty_cache()
@@ -417,6 +433,113 @@ class Trainer(GRPOTrainer):
         if return_entropy:
             return lls, entropy
         return lls
+
+    def _log_three_way_metrics(
+        self,
+        policy_outputs_all: list[dict[str, Any]],
+        num_steps: torch.Tensor,
+        post_gathering_policy_only_index,
+        mode: str,
+        gen_length: int,
+    ) -> None:
+        """Compute + log training-time metrics specific to the 3-way policy.
+
+        Logs:
+          * action rates (unmask / keep / remask) averaged over active positions
+          * early/mid/late remask rates (by relative denoising progress)
+          * mean confidence of tokens the policy chose to remask (sanity check:
+            should be lower than keep/unmask confidences)
+          * NFE mean/std/min/max (already logged below for 2-way)
+        """
+        per_action_counts = torch.zeros(3, device=num_steps.device)
+        active_total = torch.zeros(1, device=num_steps.device)
+        early_remask = torch.zeros(1, device=num_steps.device)
+        early_active = torch.zeros(1, device=num_steps.device)
+        mid_remask = torch.zeros(1, device=num_steps.device)
+        mid_active = torch.zeros(1, device=num_steps.device)
+        late_remask = torch.zeros(1, device=num_steps.device)
+        late_active = torch.zeros(1, device=num_steps.device)
+        remask_conf_sum = torch.zeros(1, device=num_steps.device)
+        remask_conf_count = torch.zeros(1, device=num_steps.device)
+
+        for i in range(
+            len(policy_outputs_all) - (1 if self.args.es_thresholds else 0)
+        ):
+            samples = policy_outputs_all[i]["samples"]  # (B, T, L) int64
+            ms = policy_outputs_all[i]["sampling_masks"]  # (B, T, L) bool
+            policy_inputs = policy_outputs_all[i]["policy_inputs"]
+
+            B, T, L = samples.shape
+            active = ms  # (B, T, L)
+            active_f = active.float()
+
+            # Action counts
+            for a in range(3):
+                per_action_counts[a] += ((samples == a) & active).float().sum()
+            active_total += active_f.sum()
+
+            # Early/mid/late buckets by timestep index within the trajectory
+            t_idx = torch.arange(T, device=samples.device).view(1, T, 1).expand_as(samples)
+            early_buk = t_idx < (T // 3)
+            late_buk = t_idx >= (2 * T // 3)
+            mid_buk = ~(early_buk | late_buk)
+
+            remask_mask = (samples == ACTION_REMASK) & active
+            early_remask += (remask_mask & early_buk).float().sum()
+            early_active += (active & early_buk).float().sum()
+            mid_remask += (remask_mask & mid_buk).float().sum()
+            mid_active += (active & mid_buk).float().sum()
+            late_remask += (remask_mask & late_buk).float().sum()
+            late_active += (active & late_buk).float().sum()
+
+            # Mean confidence of remasked tokens (uses policy confidence input if present).
+            # For dit_confidence policy, policy_inputs is (mask, c_input (B, T, L, topp), time).
+            # For dit_hidden we skip this metric.
+            if len(policy_inputs) >= 2 and isinstance(policy_inputs[1], torch.Tensor):
+                c_input = policy_inputs[1]
+                if c_input.dim() == 4 and c_input.shape[-1] >= 1:
+                    c_top1 = c_input[..., 0]  # (B, T, L)
+                    if c_top1.shape == samples.shape:
+                        sel = remask_mask
+                        if sel.any():
+                            remask_conf_sum += c_top1[sel].float().sum()
+                            remask_conf_count += sel.float().sum()
+
+        def _safe_div(n, d):
+            return (n / d.clamp(min=1.0)).item()
+
+        action_total = per_action_counts.sum().clamp(min=1.0)
+        self._metrics[mode]["action_rate/unmask"].append(
+            (per_action_counts[ACTION_UNMASK] / action_total).item()
+        )
+        self._metrics[mode]["action_rate/keep"].append(
+            (per_action_counts[1] / action_total).item()
+        )
+        self._metrics[mode]["action_rate/remask"].append(
+            (per_action_counts[ACTION_REMASK] / action_total).item()
+        )
+        self._metrics[mode]["remask_rate/early"].append(
+            _safe_div(early_remask, early_active)
+        )
+        self._metrics[mode]["remask_rate/mid"].append(_safe_div(mid_remask, mid_active))
+        self._metrics[mode]["remask_rate/late"].append(
+            _safe_div(late_remask, late_active)
+        )
+        if remask_conf_count.item() > 0:
+            self._metrics[mode]["remask_conf_mean"].append(
+                _safe_div(remask_conf_sum, remask_conf_count)
+            )
+
+        # NFE stats (shared with 2-way block below, but we log here for 3-way).
+        num_steps_policy = num_steps[post_gathering_policy_only_index]
+        self._metrics[mode]["num_steps_mean"].append(num_steps_policy.mean().item())
+        self._metrics[mode]["num_steps_std"].append(num_steps_policy.std().item())
+        self._metrics[mode]["num_steps_min"].append(num_steps_policy.min().item())
+        self._metrics[mode]["num_steps_max"].append(num_steps_policy.max().item())
+        # Normalized NFE (vs gen_length — useful when comparing alpha sweep runs)
+        self._metrics[mode]["nfe_per_token"].append(
+            (num_steps_policy.float().mean() / max(gen_length, 1)).item()
+        )
 
     def _compute_mask_loglikelihood(
         self,
@@ -436,6 +559,13 @@ class Trainer(GRPOTrainer):
                 samples=samples,
                 utilities=sampling_inputs,
                 stop_logit=self.args.dpls_stop_logit,
+                mask_index=sampling_masks,
+                dtype=self.args.loglikelihood_dtype,
+            )
+        elif self.args.sampling_mode == "three_way":
+            return categorical_batch_loglik(
+                samples=samples,
+                utilities=sampling_inputs,
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
             )
@@ -900,6 +1030,58 @@ class Trainer(GRPOTrainer):
                     self.s3_callback.on_save(
                         self.args, self.state, self.control, best=True
                     )
+
+        # 3-way categorical policy has a different sample/logits shape; log
+        # three-action metrics and skip the bernoulli-specific aggregations.
+        if self.args.sampling_mode == "three_way":
+            self._log_three_way_metrics(
+                policy_outputs_all=policy_outputs_all,
+                num_steps=num_steps,
+                post_gathering_policy_only_index=post_gathering_policy_only_index,
+                mode=mode,
+                gen_length=gen_length,
+            )
+            if (
+                self.log_completions
+                and self.state.global_step % self.args.logging_steps == 0
+            ):
+                prompts_to_log = gather_object(prompts_text)
+                completions_to_log = gather_object(completions_text)
+                if self.accelerator.is_main_process:
+                    if _rich_available:
+                        print_prompt_completions_sample(
+                            prompts_to_log,
+                            completions_to_log,
+                            rewards.tolist(),
+                            self.state.global_step,
+                        )
+                    if (
+                        self.args.report_to
+                        and "wandb" in self.args.report_to
+                        and wandb.run is not None
+                    ):
+                        import pandas as pd
+
+                        table = {
+                            "step": [str(self.state.global_step)] * len(rewards),
+                            "prompt": prompts_to_log,
+                            "completion": completions_to_log,
+                            "reward": rewards.tolist(),
+                        }
+                        df = pd.DataFrame(table)
+                        wandb.log({"completions": wandb.Table(dataframe=df)})
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            return {
+                "prompt_ids": prompt_ids,
+                "prompt_mask": prompt_mask,
+                "completion_ids": completion_ids,
+                "completion_mask": completion_mask,
+                "advantages": advantages,
+                "policy_outputs": policy_outputs_all,
+            }
 
         # Log metrics to detect the collapse to 0 policy
         avg_us_all = []

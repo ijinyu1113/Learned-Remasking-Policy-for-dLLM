@@ -1,8 +1,5 @@
-#
-# For licensing see accompanying LICENSE file.
-# Copyright (C) 2026 Apple Inc. All Rights Reserved.
-#
-### Adapted from https://github.com/dllm-reasoning/d1 (Apache 2.0)
+# 3-way (unmask / keep / remask) learned policy on LLaDA-8B-Instruct, BL=32.
+# alpha_compute_reward=0.0 -> accuracy-only objective (no efficiency term).
 # ModelConfig
 torch_dtype: bfloat16
 load_in_4bit: false
@@ -46,6 +43,7 @@ gradient_checkpointing: false
 gradient_checkpointing_kwargs:
   use_reentrant: false
 
+# Preemption-safe: auto-resume enabled; small save interval so preempts lose <1.5% of work
 resume_from_checkpoint: true
 
 # Parameters for saving checkpoints
@@ -74,3 +72,9 @@ policy_dropout: 0.0
 policy_time_embed_dim: 128
 policy_full_context: true
 policy_smart_init: -2.0
+
+# ===== 3-way specific =====
+sampling_mode: three_way
+num_policy_actions: 3
+alpha_compute_reward: 0.0
+alpha_correctness_reward: 1.0
