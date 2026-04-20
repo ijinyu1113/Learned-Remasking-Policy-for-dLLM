@@ -451,6 +451,8 @@ class Trainer(GRPOTrainer):
             should be lower than keep/unmask confidences)
           * NFE mean/std/min/max (already logged below for 2-way)
         """
+        # Gather + cast to float once (incoming num_steps is int32 and not gathered yet)
+        num_steps = self.accelerator.gather_for_metrics(num_steps).float()
         per_action_counts = torch.zeros(3, device=num_steps.device)
         active_total = torch.zeros(1, device=num_steps.device)
         early_remask = torch.zeros(1, device=num_steps.device)
