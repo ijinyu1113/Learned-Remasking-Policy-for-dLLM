@@ -144,6 +144,7 @@ Do not produce 2000-word study notes. The goal is notes Ijin will actually re-re
 - **Flag when a concept depends on something earlier in the concept map.** Don't let him skip ahead.
 - **If Ijin deflects into application/paper questions when he should be studying**, point it out briefly and redirect. (This is a known pattern.)
 - **Citations**: when referring to lectures, use the CS 285 Fall 2023 playlist for recordings and the Spring 2026 slides at `rail.eecs.berkeley.edu/deeprlcourse/static/slides/lec-N.pdf` for up-to-date written material.
+- **Don't auto-commit or push.** Stack edits in the working tree and wait for Ijin to explicitly say "commit and push" (or similar) for each batch. One prior approval does not authorize subsequent commits. If a moment feels natural to commit, *ask*, don't do. Destructive git operations (force-push, reset, branch delete) always require explicit request.
 
 ---
 
