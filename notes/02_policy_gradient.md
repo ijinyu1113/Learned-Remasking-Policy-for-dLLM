@@ -333,7 +333,7 @@ $$
 Minimizing it pushes `p_θ(y_i|x_i)` up. Every training example contributes **equally** —
 weight 1.
 
-**Policy gradient "loss"** (pseudo-loss; see §8), for one sampled action:
+**Policy gradient "loss"** (pseudo-loss; see §9), for one sampled action:
 
 $$
 \mathcal{L}_{\text{PG}}(\theta) = - \log \pi_\theta(a_t^{(i)} | s_t^{(i)}) \cdot r(\tau^{(i)})
@@ -536,23 +536,153 @@ the noisy no-signal terms.
 action in it; reward-to-go attributes it only to actions that causally preceded the
 reward. Same expectation, strictly lower variance.
 
-### 7.3 Off-policy importance weighting
+---
 
-Sample from a *behavior* policy `π̄` instead of the current `π_θ` (e.g. `π̄` = the policy
-at the start of this update step). Reweight:
+## 8. Off-policy importance weighting
+
+**Purpose: sample efficiency, not variance reduction.** Sampling trajectories from an LLM
+is expensive — seconds per rollout, multi-GPU forward passes. Importance weighting lets
+us reuse one expensive batch of rollouts across many gradient steps, paying the sampling
+cost once instead of K times.
+
+**Vocabulary:**
+
+- **Target policy** `π_θ` — the one being *updated*. Parameters θ change with every
+  gradient step.
+- **Behavior policy** `π̄` (also `π_old`) — the policy that *produced the trajectories*
+  we're training on. Its parameters are *frozen*.
+- **On-policy** algorithm: `π̄ = π_θ` at all times. Every gradient step is followed by
+  fresh sampling.
+- **Off-policy** algorithm: `π̄` and `π_θ` can differ. Requires a correction factor (§8.1).
+
+### 8.1 The importance sampling identity
+
+We want an expectation under `π_θ` but we have samples from `π̄`.
+
+**Step 1 — start from the definition** of expectation:
 
 $$
-\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \bar\pi}\!\left[\frac{\pi_\theta(a|s)}{\bar\pi(a|s)} \, \nabla_\theta \log \pi_\theta(a|s)\, r(s,a)\right]
+\mathbb{E}_{a \sim \pi_\theta}[f(a)] = \int \pi_\theta(a)\, f(a)\, da
 $$
 
-The ratio `π_θ/π̄` is the **importance weight** — it corrects for the mismatch between
-"the policy you actually sampled from" and "the policy you're optimizing." This is what
-lets PPO and GRPO reuse samples across multiple gradient steps instead of re-collecting
-after every update.
+**Step 2 — multiply and divide by `π̄(a)`** (valid wherever `π̄(a) > 0`):
+
+$$
+= \int \pi_\theta(a)\, f(a) \cdot \frac{\bar\pi(a)}{\bar\pi(a)}\, da
+= \int \bar\pi(a) \cdot \underbrace{\frac{\pi_\theta(a)}{\bar\pi(a)}}_{\text{importance ratio}} \cdot f(a)\, da
+$$
+
+**Step 3 — recognize the expectation under `π̄`**:
+
+$$
+= \mathbb{E}_{a \sim \bar\pi}\!\left[\frac{\pi_\theta(a)}{\bar\pi(a)} \cdot f(a)\right]
+$$
+
+Sampling `a ~ π̄` and multiplying the integrand by the ratio `π_θ/π̄` gives an
+**unbiased** estimate of the expectation under `π_θ`. The samples live "under π̄" but
+the correction re-weights them to "as if under π_θ."
+
+**Applied to the policy gradient**:
+
+$$
+\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim \pi_\theta}\!\bigl[\nabla_\theta \log \pi_\theta(\tau) \cdot r(\tau)\bigr]
+= \mathbb{E}_{\tau \sim \bar\pi}\!\left[\frac{\pi_\theta(\tau)}{\bar\pi(\tau)} \cdot \nabla_\theta \log \pi_\theta(\tau) \cdot r(\tau)\right]
+$$
+
+**Caveat**: unbiased ≠ low variance. Importance weighting can *increase* variance if the
+ratio is extreme. §8.3 handles that with clipping.
+
+### 8.2 Why K gradient steps ≠ one big step
+
+A natural question: if we're going to do `K` gradient steps on one batch, why not just
+take *one* step with `K×` the learning rate? Answer: **the gradient depends on θ**, and
+re-evaluating it at each intermediate `θ_k` gives a fundamentally different (better)
+update path.
+
+**K small steps** (re-evaluating the gradient each time):
+
+$$
+\theta_1 = \theta_0 + \alpha \cdot \nabla J(\theta_0)
+$$
+$$
+\theta_2 = \theta_1 + \alpha \cdot \nabla J(\theta_1)
+$$
+$$
+\vdots
+$$
+$$
+\theta_K = \theta_{K-1} + \alpha \cdot \nabla J(\theta_{K-1})
+$$
+
+**One big step** (gradient evaluated only at `θ_0`):
+
+$$
+\theta_K^{\text{big}} = \theta_0 + K\alpha \cdot \nabla J(\theta_0)
+$$
+
+These are equal **only if** `∇J(θ_0) = ∇J(θ_1) = … = ∇J(θ_{K-1})` — i.e., the gradient
+is *constant* over the path. That's true only on a flat landscape (Hessian = 0). In
+general, different θ values give different gradients, so re-evaluating at `θ_0, θ_1,
+…, θ_{K-1}` uses fresh information at each step.
+
+**Intuition — walking down a curved hill:**
+
+- One big step = jump blindly in the direction of the slope at your current position.
+  If the valley curves, you might overshoot and end up uphill on the other side.
+- K small steps = walk a bit, check the slope again, walk a bit more. You follow the
+  curve of the landscape.
+
+**What specifically changes with θ here?** The score function `∇log π_θ(a|s)`. At `θ_0`
+it tells you "which direction makes this sampled action more likely under `π_{θ_0}`."
+After a gradient step, `π_θ` has changed, so the *same* sampled action gets a different
+`∇log π_{θ_1}(a|s)`. Re-evaluating the gradient at the new θ uses fresh information
+about the current policy.
+
+Second effect: **adaptive optimizers** (Adam, RMSProp) maintain state (momentum, running
+variance estimates) that updates with each step. One big step can't replicate that
+evolution — you'd lose adaptive step sizing.
+
+**The PPO/GRPO optimization pattern:**
+
+1. Sample one expensive batch of rollouts from `π_θ` → freeze a snapshot as `π̄`.
+2. Take `K` gradient steps on `π_θ` using that batch, re-evaluating `∇log π_{θ_k}` at
+   each step. Apply the importance ratio `π_{θ_k}/π̄` to correct for the drift.
+3. After `K` steps, re-sample fresh rollouts with the updated `π_θ`. Repeat.
+
+You get `K` rounds of fresh gradient evaluation for the price of **one** batch of
+rollouts.
+
+### 8.3 Clipping (the PPO safety net)
+
+**The problem with raw importance weighting**: if `π_θ` drifts far from `π̄`, the ratio
+`π_θ/π̄` can blow up (or go near zero) on some samples. A few large-ratio terms dominate
+the estimator → high variance, unstable training.
+
+**Fix — PPO's clipped surrogate**: clip the ratio into `[1-ε, 1+ε]` and take the **more
+pessimistic** of the clipped and unclipped objectives:
+
+$$
+L^{\text{PPO}}(\theta) = \mathbb{E}\!\left[\min\!\Bigl(\underbrace{\frac{\pi_\theta}{\bar\pi} \cdot \hat A}_{\text{unclipped}},\; \underbrace{\operatorname{clip}\!\Bigl(\tfrac{\pi_\theta}{\bar\pi},\, 1-\epsilon,\, 1+\epsilon\Bigr) \cdot \hat A}_{\text{clipped}}\Bigr)\right]
+$$
+
+- When `π_θ/π̄ ∈ [1-ε, 1+ε]`: clipped and unclipped agree → gradient is normal.
+- When outside: clipping activates → the loss is capped, and the gradient is small.
+  Prevents a single high-ratio sample from blowing up the update.
+
+**In this repo** ([train/trainer.py:290](train/trainer.py#L290)):
+
+```python
+coeff_1 = torch.exp(logps_timestep - old_logps_slice)        # raw ratio π_θ/π̄
+coeff_2 = torch.clamp(coeff_1, 1 - self.args.epsilon, 1 + self.args.epsilon)
+per_timestep_loss = torch.min(coeff_1 * batch_advantages,
+                              coeff_2 * batch_advantages)
+```
+
+Full treatment of PPO/TRPO: CS 285 Lec 9 (Advanced Policy Gradients).
 
 ---
 
-## 8. Implementing it with autograd (Lec 5 Part 4)
+## 9. Implementing it with autograd (Lec 5 Part 4)
 
 You don't compute `∇log π · r` explicitly. You define a **pseudo-loss** whose gradient
 *is* the policy gradient, and let autograd handle everything:
@@ -588,14 +718,14 @@ Levine's three practical warnings (Lec 5 Part 4):
 
 ---
 
-## 9. Policy gradient for LLMs (Section 7 §2)
+## 10. Policy gradient for LLMs (Section 7 §2)
 
 LLM RL is usually framed as a **one-step contextual bandit**: prompt `s`, completion `a`,
 reward `r(s,a)`. You don't need multi-step MDP formalism because the LLM is
 autoregressive — the per-token factorization happens inside
 `log π_θ(a|s) = Σ_t log π_θ(token_t | s, tokens_{<t})`.
 
-(Our dLLM setup is a slight generalization — see §11.5 below.)
+(Our dLLM setup is a slight generalization — see §12.5 below.)
 
 **Vanilla (REINFORCE) estimator for LLMs:**
 
@@ -633,7 +763,7 @@ $$
 
 ---
 
-## 10. Where it lives in this repo
+## 11. Where it lives in this repo
 
 File: [train/trainer.py](train/trainer.py), function `compute_loss` ([line 160](train/trainer.py#L160)).
 
@@ -654,9 +784,9 @@ Mapping to the theory above:
 
 | Variable               | Theory term                         | Section            |
 |------------------------|-------------------------------------|--------------------|
-| `logps_timestep`       | `log π_θ(a_t | s_t)`                | §3, §9             |
-| `old_logps_slice`      | `log π̄(a_t | s_t)` (behavior policy) | §7.3, §9          |
-| `coeff_1`              | importance ratio `π_θ/π̄`            | §7.3, §9          |
+| `logps_timestep`       | `log π_θ(a_t | s_t)`                | §3, §10            |
+| `old_logps_slice`      | `log π̄(a_t | s_t)` (behavior policy) | §8, §10          |
+| `coeff_1`              | importance ratio `π_θ/π̄`            | §8, §10          |
 | `batch_advantages`     | `Q̂_t − b` (reward-to-go minus baseline) | §7.1 + §7.2    |
 | `torch.min(…clamp…)`   | **PPO clipped surrogate**           | CS 285 Lec 9       |
 | `loss_acummulator -= ` | `−` sign = maximize expected reward | §3                 |
@@ -672,7 +802,7 @@ That single line is the GRPO baseline. No value network — just subtract the gr
 
 ---
 
-## 11. Common confusions (for you specifically)
+## 12. Common confusions (for you specifically)
 
 **1. "Policy gradient" ≠ "the gradient of the policy."** It's the gradient of **expected
 reward** `J(θ)` with respect to policy parameters θ. Easy to mis-parse on first read.
@@ -682,7 +812,7 @@ reward** `J(θ)` with respect to policy parameters θ. Easy to mis-parse on firs
      can estimate it from samples.
    - (b) `log π` in the pseudo-loss is exactly the cross-entropy loss you already know, so
      the implementation is "supervised learning weighted by advantage" — one line
-     different (§4, §8).
+     different (§4, §9).
 
 **3. Credit assignment in *this* project is brutal.** The reward is sparse (final-answer
 correctness + efficiency penalty — see [cs288_remasking_policy_plan.md §3.1](cs288_remasking_policy_plan.md)).
@@ -697,18 +827,18 @@ sampling), the importance ratio is exactly 1, so the PPO loss reduces to
 REINFORCE with a baseline — §7.1 exactly. Clipping only matters after the first few
 updates drift `π_θ` away from `π_old`.
 
-**5. dLLM MDP vs. §9's contextual bandit.** Section 7 frames LLM RL as a *one-step* MDP.
+**5. dLLM MDP vs. §10's contextual bandit.** Section 7 frames LLM RL as a *one-step* MDP.
 That works for standard autoregressive LLMs because you can factor the whole completion's
 probability as `Π_t π(token_t | context)` in a single forward pass. Our dLLM setup is
 different: the policy acts **multiple times** (one action-vector per denoising step), and
 the final answer is the joint product of those action sequences. So we're closer to a
 proper multi-step MDP with a sparse terminal reward, even though each individual step's
-action is per-position. Keep this in mind — §9's framing is a useful baseline but not
+action is per-position. Keep this in mind — §10's framing is a useful baseline but not
 exactly our setup.
 
 ---
 
-## 12. Check-yourself questions
+## 13. Check-yourself questions
 
 Answer these before moving on. Don't Google. Show me your answers.
 
@@ -733,7 +863,7 @@ would do if `advantages` had a gradient path back to θ.)
 
 ---
 
-## 13. What's next
+## 14. What's next
 
 Once Q1–Q4 are solid, CLAUDE.md concept 3 is *"Variance reduction: baselines,
 advantages"* — but you've already seen the core of that here (§7). The next genuinely
@@ -741,11 +871,11 @@ new content is:
 
 - **GAE** (generalized advantage estimation) — interpolates between high-variance MC and
   high-bias bootstrap. Not used in this repo (GRPO sidesteps it), but useful context.
-- **Group-relative advantage** in GRPO — already covered in §9; next step is to stare at
+- **Group-relative advantage** in GRPO — already covered in §10; next step is to stare at
   the actual GRPO loss in [train/trainer.py:160](train/trainer.py#L160) and match every
   term to an equation.
 - **PPO clipping** — the `torch.min(coeff_1·adv, coeff_2·adv)` trick with `coeff_2`
-  clamped to `[1−ε, 1+ε]`. Briefly motivated in §7.3 above; full treatment in CS 285
+  clamped to `[1−ε, 1+ε]`. Covered in §8.3 above; full treatment in CS 285
   Lec 9.
 
 Then we resume the shape-tracing exercise from the starter sequence (step 2 of
