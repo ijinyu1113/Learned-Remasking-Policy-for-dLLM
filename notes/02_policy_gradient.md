@@ -165,8 +165,15 @@ $$
 Compactly:
 
 $$
-p_\theta(\tau) = p(s_1) \prod_{t=1}^{H} \pi_\theta(a_t|s_t) \cdot p(s_{t+1}|s_t,a_t)
+p_\theta(\tau) = p(s_1) \left(\prod_{t=1}^{H} \pi_\theta(a_t|s_t)\right) \left(\prod_{t=1}^{H-1} p(s_{t+1}|s_t,a_t)\right)
 $$
+
+Count check: trajectory `τ = (s_1, a_1, …, s_H, a_H)` has `H` actions and `H-1`
+transitions between the `H` visited states. The two products reflect that. (Levine's
+slides use a slightly different convention where the trajectory implicitly includes a
+terminal state `s_{H+1}` after the last action, making the transitions product run to `H`
+instead of `H-1`. Either convention works — the transition terms drop out under `∇_θ`
+anyway, §3.3.)
 
 The subscript θ is a reminder: change θ → change `π_θ(a_t|s_t)` at every step → different
 trajectories become more/less probable.
@@ -422,16 +429,112 @@ multiplier, so you're adding a lot of big vectors and the noise dominates). A ba
 
 ### 7.2 Causality / reward-to-go
 
-Actions at time `t` can't affect rewards at time `t' < t`. So instead of weighting
-`∇log π(a_t|s_t)` by the *whole* trajectory's reward, weight it by the **future** reward
-only:
+Starting claim: actions at time `t` can't affect rewards at time `t' < t`. So we should
+weight `∇log π(a_t|s_t)` by the **future** reward only, not the *whole* trajectory's
+reward. Here's how this is derived carefully — it changes the *structure* of the
+expression from a product-of-sums to a sum-of-products, so we need to show every step.
+
+**Step 1 — start from the product-of-sums form** (§3.4):
 
 $$
-\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_i \sum_t \nabla_\theta \log \pi_\theta(a_t^{(i)}|s_t^{(i)}) \; \underbrace{\left(\sum_{t'=t}^{H} r(s_{t'}^{(i)}, a_{t'}^{(i)}) - b_t\right)}_{\hat Q_t^{(i)} - b_t}
+\nabla_\theta J(\theta) = \mathbb{E}_{\tau \sim p_\theta}\!\left[\,\underbrace{\left(\sum_{t=1}^{H} \nabla_\theta\log\pi_\theta(a_t|s_t)\right)}_{\text{sum of gradients}} \cdot \underbrace{\left(\sum_{t=1}^{H} r(s_t, a_t)\right)}_{\text{sum of rewards}}\,\right]
 $$
 
-`Q̂_t^{(i)}` is the **reward-to-go**. Strictly lower variance than the full-trajectory
-form, still unbiased.
+**Step 2 — expand the product with FOIL.** Every term in the first sum multiplied by
+every term in the second:
+
+$$
+\left(\sum_{t=1}^{H} \nabla_\theta\log\pi_\theta(a_t|s_t)\right) \left(\sum_{t=1}^{H} r(s_t, a_t)\right)
+= \sum_{t=1}^{H} \sum_{t'=1}^{H} \nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r(s_{t'}, a_{t'})
+$$
+
+This is a **double sum over all pairs `(t, t')`**. Structurally identical to Step 1, just
+written out. Split the pairs into three groups based on the relationship between `t` and
+`t'`:
+
+- `t' > t`: reward arrived *after* the action → keep.
+- `t' = t`: reward at the same step as the action → keep.
+- `t' < t`: reward arrived *before* the action → we'll show this vanishes.
+
+**Step 3 — causality argument: the `t' < t` cross-terms are zero in expectation.** Claim:
+
+$$
+\mathbb{E}_{\tau \sim p_\theta}\!\bigl[\nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r(s_{t'}, a_{t'})\bigr] = 0, \qquad \text{when } t' < t
+$$
+
+**Why:** `r(s_{t'}, a_{t'})` is a function of `(s_{t'}, a_{t'})` only — both of which were
+realized *before* `a_t` was sampled. So conditional on the trajectory history up to `s_t`,
+the reward `r_{t'}` is a *constant* (it's already been observed). We can pull it out of
+the inner expectation over `a_t`:
+
+$$
+\mathbb{E}_{a_t \sim \pi_\theta(\cdot|s_t)}\!\bigl[\nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r_{t'} \,\big|\, \text{history}\bigr]
+= r_{t'} \cdot \mathbb{E}_{a_t \sim \pi_\theta(\cdot|s_t)}\!\bigl[\nabla_\theta\log\pi_\theta(a_t|s_t)\bigr]
+$$
+
+Now the inner expectation is the expected **score function** under its own distribution:
+
+$$
+\mathbb{E}_{a_t \sim \pi_\theta}\!\bigl[\nabla_\theta\log\pi_\theta(a_t|s_t)\bigr]
+= \int \pi_\theta(a|s_t)\, \nabla_\theta\log\pi_\theta(a|s_t)\, da
+\stackrel{\text{log-deriv}}{=} \int \nabla_\theta \pi_\theta(a|s_t)\, da
+\stackrel{\text{Leibniz}}{=} \nabla_\theta \!\!\underbrace{\int \pi_\theta(a|s_t)\, da}_{=1}
+= \nabla_\theta 1 = 0
+$$
+
+Same identity as §7.1: probabilities normalize to 1 by definition, so their gradient is
+0. This gives us `r_{t'} · 0 = 0` conditional on the history. By the **tower rule**
+(iterated expectation), the unconditional expectation is also 0:
+
+$$
+\mathbb{E}\bigl[\nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r_{t'}\bigr]
+= \mathbb{E}\!\bigl[\underbrace{\mathbb{E}[\nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r_{t'} \mid \text{history}]}_{=\,0}\bigr] = 0
+$$
+
+**Step 4 — drop the zero-in-expectation pairs.** What remains is only `t' ≥ t`:
+
+$$
+\sum_{t=1}^{H} \sum_{t' \geq t} \nabla_\theta\log\pi_\theta(a_t|s_t) \cdot r(s_{t'}, a_{t'})
+$$
+
+**Step 5 — re-group.** The inner sum over `t' ≥ t` doesn't involve `∇log π_θ(a_t|s_t)`,
+so factor it out of the inner sum:
+
+$$
+= \sum_{t=1}^{H} \nabla_\theta\log\pi_\theta(a_t|s_t) \cdot \underbrace{\left(\sum_{t'=t}^{H} r(s_{t'}, a_{t'})\right)}_{\hat Q_t}
+$$
+
+This is now a **sum of products** — outer sum over `t`, and each term is
+`∇log π_θ(a_t|s_t) · Q̂_t`. That's the structural change you spotted: product-of-sums →
+sum-of-products, bridged by Steps 2–4.
+
+**Step 6 — combine with the baseline from §7.1.** Subtracting a per-step baseline `b_t`
+from `Q̂_t` doesn't bias the gradient (same argument as §7.1, applied per step):
+
+$$
+\boxed{\;\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_i \sum_t \nabla_\theta \log \pi_\theta(a_t^{(i)}|s_t^{(i)}) \cdot \underbrace{\bigl(\hat Q_t^{(i)} - b_t\bigr)}_{\text{advantage }\hat A_t^{(i)}}\;}
+$$
+
+**Terminology:**
+
+- `Q̂_t^{(i)} = Σ_{t' ≥ t} r_{t'}^{(i)}` is the **reward-to-go** from step `t` onward in
+  trajectory `i`.
+- `Â_t^{(i)} = Q̂_t^{(i)} - b_t` is the **advantage**: how much better did this action
+  do than baseline, looking only at future reward.
+
+**Why variance decreases:**
+
+The steps dropped terms whose *expectation* was zero. But in any finite sample, those
+"should-be-zero" terms aren't exactly zero — they have variance. Removing them removes
+noise without changing the true gradient.
+
+Analogy: averaging `[5, 5, 5, 5]` vs `[5, 5, 5, 5] + (zero-mean noise per entry)`. Same
+mean; the first has zero variance, the second has positive variance. Reward-to-go drops
+the noisy no-signal terms.
+
+**In one sentence**: the original form attributes a trajectory's total reward to *every*
+action in it; reward-to-go attributes it only to actions that causally preceded the
+reward. Same expectation, strictly lower variance.
 
 ### 7.3 Off-policy importance weighting
 
