@@ -403,29 +403,239 @@ These all "average out" with enough samples — but the required `N` can be enor
 
 ## 7. Variance reduction (Lec 5 Part 3)
 
-Three fixes, in increasing order of power.
+Two fixes, both based on the same underlying identity.
 
 ### 7.1 Baselines
 
-Subtract a constant `b` from the reward:
+#### What a baseline IS (the noun)
+
+A **baseline** `b` is any number (or function) we *subtract from the reward* before
+multiplying by the score `∇log p`. The baseline-adjusted estimator:
 
 $$
-\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_i \nabla_\theta \log p_\theta(\tau^{(i)}) \bigl[r(\tau^{(i)}) - b\bigr]
+\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_{i=1}^{N} \nabla_\theta \log p_\theta(\tau^{(i)}) \cdot \bigl[r(\tau^{(i)}) - b\bigr]
 $$
 
-This is **unbiased** (the true gradient doesn't change), because:
+Compare to the raw REINFORCE estimator from §3.4, which uses `r(τ)` alone:
 
 $$
-\mathbb{E}\!\bigl[\nabla_\theta \log p_\theta(\tau) \cdot b\bigr] = b \nabla_\theta \int p_\theta(\tau)\, d\tau = b \nabla_\theta 1 = 0
+\nabla_\theta J(\theta) \approx \frac{1}{N} \sum_{i=1}^{N} \nabla_\theta \log p_\theta(\tau^{(i)}) \cdot r(\tau^{(i)})
 $$
 
-Subtracting a constant from everything drops the variance without biasing the gradient.
-Simple choice that works well: `b = (1/N) Σ r(τ^(i))` (average reward across this batch).
+**Three valid forms for `b`** (increasing generality; all unbiased):
 
-**Why this matters**: if you shift all rewards by +100, the *true* gradient is unchanged
-but the REINFORCE *estimator's* variance explodes (every trajectory gets a big positive
-multiplier, so you're adding a lot of big vectors and the noise dominates). A baseline
-(essentially subtracting the batch mean) saves you from that.
+| Form | Example | Used in |
+|---|---|---|
+| `b` = constant | batch-mean reward | Vanilla PG |
+| `b = b(s_t)` | learned value function `V(s_t)` | Actor-critic, PPO |
+| `b = b(s_1, …, s_t)` | history-dependent | Rare in practice |
+
+**Only constraint**: `b` cannot depend on the action `a_t` (for reasons that become clear
+in the proof, Step B).
+
+We claim two things:
+
+- **Claim 1 (unbiased):** `E[∇log p · (r − b)] = E[∇log p · r]`. Subtracting any valid `b`
+  leaves the true gradient unchanged.
+- **Claim 2 (variance may decrease):** with the *right* `b`, the estimator has lower
+  variance than raw REINFORCE. (Wrong `b` can make it worse.)
+
+We'll prove both, then do a concrete numerical example.
+
+---
+
+#### Proof of Claim 1 (unbiased)
+
+**Step A — distribute the expectation across the subtraction**:
+
+$$
+\mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau) \cdot (r(\tau) - b)\bigr]
+= \mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau) \cdot r(\tau)\bigr]
+- \mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau) \cdot b\bigr]
+$$
+
+The first term is the true gradient `∇J(θ)` (from §3). For unbiasedness we need the
+**second term to be zero**.
+
+**Step B — if `b` is a constant, pull it out of the expectation**:
+
+$$
+\mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau) \cdot b\bigr]
+= b \cdot \mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau)\bigr]
+$$
+
+(This is why `b` can't depend on `a_t`: if it did, you couldn't pull it out, and the
+rest of the argument fails. For `b(s_t)` see "State-dependent baselines" below — same
+argument with a conditional expectation.)
+
+**Step C — write the remaining expectation as an integral**:
+
+$$
+\mathbb{E}\bigl[\nabla_\theta \log p_\theta(\tau)\bigr]
+= \int p_\theta(\tau)\, \nabla_\theta \log p_\theta(\tau)\, d\tau
+$$
+
+**Step D — log-derivative trick in reverse** (`p · ∇log p = ∇p`):
+
+$$
+= \int \nabla_\theta p_\theta(\tau)\, d\tau
+$$
+
+**Step E — Leibniz's rule** (swap gradient and integral):
+
+$$
+= \nabla_\theta \int p_\theta(\tau)\, d\tau
+$$
+
+**Step F — probabilities normalize to 1 by definition**:
+
+$$
+= \nabla_\theta (1) = 0
+$$
+
+So `E[∇log p] = 0` under its own distribution — always, for any valid probability
+density. This is called the **score-function identity**.
+
+**Combining**: `E[∇log p · b] = b · 0 = 0`. Step A becomes:
+
+$$
+\mathbb{E}[\nabla_\theta \log p_\theta(\tau) \cdot (r - b)] = \mathbb{E}[\nabla_\theta \log p_\theta(\tau) \cdot r] - 0 = \nabla_\theta J(\theta)
+$$
+
+True gradient preserved. ∎
+
+**Why "b cannot depend on `a_t`":** if `b` depended on the action, you couldn't pull it
+out at Step B, and the conditional expectation over `a_t` wouldn't vanish. Making `b`
+action-dependent would **bias** the gradient. That's why value functions `V(s)` are OK
+(they depend only on state) but `Q(s, a)` is not (depends on action).
+
+**State-dependent baselines `b(s_t)`** work because at step `t`, `b(s_t)` is a constant
+given the history up to `s_t`. Same Steps B–F apply to the *conditional* expectation, and
+the unconditional expectation is 0 by the tower rule. (Same move as §7.2's causality
+argument — we'll use it there.)
+
+---
+
+#### Proof of Claim 2 (which `b` minimizes variance?)
+
+Unbiased ≠ low variance. You can pick a bad `b` and make variance **worse**. Here's how
+to find the best `b`.
+
+**Setup**: variance of our estimator (dropping the subscripts for readability):
+
+$$
+\mathrm{Var}\bigl[\nabla\log p \cdot (r - b)\bigr]
+= \mathbb{E}\bigl[(\nabla\log p)^2 (r-b)^2\bigr] - \Bigl(\underbrace{\mathbb{E}[\nabla\log p \cdot (r-b)]}_{\,=\,\nabla J,\text{ by Claim 1}}\Bigr)^2
+$$
+
+The second term `(∇J)²` **doesn't depend on `b`** (because Claim 1 says the expectation
+is unchanged by `b`). So minimizing variance = minimizing the first term:
+
+$$
+\min_b \mathbb{E}\bigl[(\nabla\log p)^2 \cdot (r-b)^2\bigr]
+$$
+
+This is a quadratic in `b`. Set derivative to 0:
+
+$$
+\frac{d}{db} \mathbb{E}\bigl[(\nabla\log p)^2 (r-b)^2\bigr]
+= -2\, \mathbb{E}\bigl[(\nabla\log p)^2 (r - b)\bigr] = 0
+$$
+
+Solving:
+
+$$
+\boxed{\;b^\star = \frac{\mathbb{E}\bigl[(\nabla\log p)^2 \cdot r\bigr]}{\mathbb{E}\bigl[(\nabla\log p)^2\bigr]}\;}
+$$
+
+This is a `(∇log p)²`-**weighted average** of `r`. Hard to compute in practice (needs
+per-sample score magnitudes).
+
+**Simple, near-optimal choice**: ignore the weights and use `b = E[r]` — just the mean
+reward. Good when `(∇log p)²` is roughly uniform across samples (often approximately
+true). Levine's phrasing: *"average reward is not the best baseline, but it's pretty
+good."* ∎
+
+---
+
+#### Concrete example (why the variance actually goes down)
+
+Three rollouts with total rewards `r ∈ {+100, +110, +120}`. Policy log-probs give us
+three gradient-vector directions `g_1, g_2, g_3` (`g_i = ∇log p_θ(τ^(i))`; we leave them
+abstract because the baseline doesn't change them).
+
+**Without baseline** (raw REINFORCE):
+
+| trajectory | reward | multiplier on `g_i` | contribution to gradient |
+|---|---|---|---|
+| τ_1 | +100 | **+100** | `+100 · g_1` |
+| τ_2 | +110 | **+110** | `+110 · g_2` |
+| τ_3 | +120 | **+120** | `+120 · g_3` |
+
+All three contributions are big positive scalars times their respective `g_i`. The
+estimator is `(100 g_1 + 110 g_2 + 120 g_3) / 3`. Dominated by the common-mode `+110`
+offset; the *relative* ordering (`τ_3 > τ_2 > τ_1`) is buried in that offset.
+
+Across many batches, different batches give different specific values of `g_i` (random
+samples), and multiplying each by `~110` amplifies that randomness → high variance.
+
+**With baseline `b = 110`** (batch mean):
+
+| trajectory | `r − b` | multiplier | contribution |
+|---|---|---|---|
+| τ_1 | +100 − 110 | **−10** | `−10 · g_1` |
+| τ_2 | +110 − 110 | **0** | `0 · g_2` |
+| τ_3 | +120 − 110 | **+10** | `+10 · g_3` |
+
+Estimator: `(−10 g_1 + 0 g_2 + +10 g_3) / 3`. Same *direction* as before (τ_3 pushed up,
+τ_1 pushed down), but **magnitudes are ~10× smaller**. The randomness in `g_i` across
+batches still matters, but it's multiplied by small numbers → small variance.
+
+**Interpretation**:
+
+- The baseline **centers** the signal. A reward isn't "good" absolutely — it's "good
+  relative to peers from the same policy."
+- An action that ties the average gets zero update. Beat the average → push up.
+  Underperform → push down.
+- You kept the **signal** (relative differences) and killed the **common-mode offset**
+  (the "+110 because all rewards happen to be around 100" bias).
+
+---
+
+#### How this lives in this repo (GRPO's baseline)
+
+File: [train/trainer.py:917-920](train/trainer.py#L917):
+
+```python
+# Normalize the rewards to compute the advantages
+advantages = rewards - mean_grouped_rewards
+```
+
+This is the **GRPO baseline** (Shao et al. 2024). `mean_grouped_rewards` is the
+**per-prompt** mean of `K` completions sampled for the same prompt. So for each
+completion `a_i` to prompt `s`:
+
+$$
+\hat A_i = r(s, a_i) - \underbrace{\frac{1}{K}\sum_{k=1}^{K} r(s, a_k)}_{\text{per-prompt mean}}
+$$
+
+**Key differences from Levine's "average reward" baseline**:
+
+- **Per-prompt, not per-batch**: each prompt has its own baseline, computed from the
+  `K=8` completions of that prompt only. Two different prompts don't share a baseline.
+- **Why?** Prompts can have wildly different reward scales. An easy GSM8K problem might
+  have all `K=8` completions getting +1; a hard problem might have all getting +0.5.
+  Using a global batch mean would conflate "this prompt is hard" with "this completion
+  is bad for this prompt." Per-prompt baseline cleanly isolates "is this completion
+  good *for this prompt*?"
+- **Formally**: this is a **state-dependent** baseline `b(s)`, not a constant. Still
+  unbiased by the conditional-expectation argument above.
+
+**One consequence to remember** (ties back to §7.1 Claim 1): within a group of K
+completions for a single prompt, if all K have identical reward, the group mean equals
+each reward, so **every advantage is zero**. No learning signal from that prompt.
+[train/trainer.py:148-152](train/trainer.py#L148) explicitly skips the optimizer step in
+that case (saves compute).
 
 ### 7.2 Causality / reward-to-go
 
@@ -720,46 +930,280 @@ Levine's three practical warnings (Lec 5 Part 4):
 
 ## 10. Policy gradient for LLMs (Section 7 §2)
 
-LLM RL is usually framed as a **one-step contextual bandit**: prompt `s`, completion `a`,
-reward `r(s,a)`. You don't need multi-step MDP formalism because the LLM is
-autoregressive — the per-token factorization happens inside
-`log π_θ(a|s) = Σ_t log π_θ(token_t | s, tokens_{<t})`.
+Standard LLM RL is framed as a **one-step contextual bandit**:
 
-(Our dLLM setup is a slight generalization — see §12.5 below.)
+- **State** `s` = the prompt.
+- **Action** `a` = the **whole completion** (all tokens, as a single action).
+- **Reward** `r(s, a)` = scalar, evaluated at the end (RLHF reward model, math correctness,
+  code-ran-or-not, etc.).
 
-**Vanilla (REINFORCE) estimator for LLMs:**
+We'll unpack two aspects of this framing that are not obvious on first read: (§10.1) why
+multi-step MDP formalism isn't needed, and (§10.2) what GRPO's `b(s_i)` baseline is
+replacing from pre-GRPO LLM RL.
+
+### 10.1 Why no multi-step MDP?
+
+**What a multi-step framing WOULD look like.** In a standard multi-step MDP you'd have:
+
+- `s_t` = context at token step `t` (prompt + tokens generated so far).
+- `a_t` = the single next token.
+- Transition `p(s_{t+1} | s_t, a_t)` = how the state evolves after generating the token.
+- Reward `r(s_t, a_t)` at each step (possibly only at the final one).
+- Trajectory `τ = (s_1, a_1, s_2, a_2, …, s_T, a_T)` with `T` tokens.
+
+You'd apply full REINFORCE / reward-to-go / per-step GAE with per-token actions.
+
+**Why you can collapse it into one step.** Two enabling facts make the one-step framing
+equivalent to the multi-step one:
+
+**Fact 1 — autoregressive factorization.** The completion probability factorizes into
+per-token probabilities, computable in a single forward pass:
+
+$$
+\pi_\theta(a \mid s) = \prod_{t=1}^{T} \pi_\theta\!\bigl(\text{token}_t \,\big|\, s,\, \text{tokens}_{<t}\bigr)
+$$
+
+So `log π_θ(a | s) = Σ_t log π_θ(token_t | s, tokens_{<t})` — just run the model once on
+the full sequence and sum token-level log-probs. The "one action" is already secretly
+per-token structured; we're just bundling the sum into a single log-prob number.
+
+**Fact 2 — deterministic transitions.** In vanilla text LLM RL, there's no stochastic
+environment dynamics. Given the prompt and the tokens generated so far, the next "state"
+is `(prompt, tokens_{≤t+1})` — **deterministic**. No dice rolls, no opponent, no noise.
+So there's nothing to model between tokens.
+
+Combine the two: the completion probability fully factorizes (Fact 1), and no
+environment-side stochasticity needs tracking (Fact 2). You can treat the whole
+completion as one "action," compute one scalar reward, and use a one-step PG estimator.
+
+**When you DO need multi-step for LLMs.** Two cases:
+
+1. **Intermediate (process) rewards.** If the reward model gives feedback per reasoning
+   step (not just the final answer), you have per-step `r_t` and reward-to-go / GAE
+   starts mattering. CS 288 Section 7 flags this: *"The only reason to use a multi-step
+   MDP is to support intermediate rewards, but we won't cover those in this section."*
+2. **Stochastic environment between steps.** Uncommon for pure text generation, but
+   applies to agentic settings (tool calls returning non-deterministic observations) —
+   and applies to **us** (see below).
+
+**Why our dLLM setup is genuinely multi-step.** The policy acts once per denoising
+**step**, not once per token. At step `t`:
+
+- State `s_t` includes per-position confidences, mask status, timestep `t/T` — these
+  depend on what the **frozen LLaDA** just produced, which has stochasticity baked in
+  (the dLLM's token predictions are a distribution, and observed confidences depend on
+  how the sequence was partially filled in).
+- Action `a_t` is the per-position 3-way choice.
+- `s_{t+1}` depends on both `a_t` and the frozen dLLM's stochastic next output.
+
+That's a genuine multi-step MDP with stochastic transitions (§12.5 common-confusion
+#5). The clean contextual-bandit framing of Section 7 doesn't apply to our setting —
+but it does apply to standard RLHF, GRPO-on-math, DeepSeek-style training.
+
+### 10.2 The PG estimator for LLMs
+
+**Vanilla (REINFORCE) estimator:**
 
 $$
 \nabla_\theta J(\theta) = \mathbb{E}_{s,a \sim \pi_\theta}\!\left[\nabla_\theta \log \pi_\theta(a|s) \cdot r(s,a)\right]
 $$
 
-**PPO-style importance-weighted estimator:**
+**PPO-style importance-weighted estimator** (from §8):
 
 $$
 \nabla_\theta J(\theta) = \mathbb{E}_{s,a \sim \bar\pi}\!\left[\frac{\pi_\theta(a|s)}{\bar\pi(a|s)} \nabla_\theta \log \pi_\theta(a|s) \cdot r(s,a)\right]
 $$
 
-Shao et al. 2024 (**GRPO**) found that for LLM RL, a **per-prompt averaging baseline**
-works as well as a learned value function:
+Same structure as everything in §3 and §8 — the contextual-bandit wrapper just means
+we're treating the prompt-completion as a single `(s, a)` pair.
+
+### 10.3 The GRPO baseline `b(s_i)`
+
+#### First: what a baseline IS (recalling §7.1)
+
+From §7.1: a **baseline** `b` is a number (or function of state) that we **subtract from
+the reward** before multiplying by the score `∇log π`. It is unbiased as long as `b` does
+not depend on the action.
+
+**A baseline does NOT replace the reward.** The reward `r(s, a)` is still there. The
+baseline is subtracted from it to form the **advantage**:
+
+$$
+\hat A(s, a) = r(s, a) - b(s)
+$$
+
+The PG estimator then uses `Â` — a *centered* version of `r` — as the scalar multiplier
+on `∇log π`. The roles:
+
+- `r(s, a)` = reward. A property of the environment. Unchanged by any baseline choice.
+- `b(s)` = baseline. Any state-dependent scalar. Different choices of `b` trade off
+  variance vs. complexity (§7.1 Claim 2).
+- `Â(s, a) = r(s, a) - b(s)` = advantage. What actually multiplies `∇log π` in the
+  gradient estimate.
+
+Keep those three separate in your head. The whole §10.3 discussion is about which
+specific `b(s)` GRPO picks.
+
+#### GRPO's specific choice of `b(s_i)`
+
+For each prompt `s_i`, sample **`K` completions** `a_1, …, a_K ~ π_θ(·|s_i)` in parallel.
+Compute each completion's reward `r(s_i, a_k)`. The baseline is the mean over the group:
 
 $$
 b(s_i) = \frac{1}{K} \sum_{k=1}^{K} r(s_i, a_k)
 $$
 
-where `{a_1, …, a_K}` are `K` different completions sampled for the *same* prompt `s_i`.
-Intuitively: *"how good is this completion compared to other completions of the same
-prompt?"*
+Crucial property: `b(s_i)` depends only on the **prompt** `s_i`. Every completion
+`a_1, …, a_K` in the same group **shares the same baseline** — a single scalar per
+prompt, broadcast to all `K` completions.
 
-**Why this matters for our project:** GRPO replaces the expensive value-function baseline
-with a cheap group-mean baseline. That's why a <1M-param policy can be trained on top of
-a frozen LLaDA-8B without also training a separate value network.
-
-**Reference-model KL regularization** (prevents reward hacking when the reward is a
-learned model):
+**Per-completion advantage**:
 
 $$
-\bar r(s,a) = r_\psi(s,a) - \beta\, D_{\mathrm{KL}}\bigl(\pi_\theta(a|s) \,\|\, \pi_{\text{ref}}(a|s)\bigr)
+\hat A_k = r(s_i, a_k) - b(s_i)
 $$
+
+Positive if `a_k` scored above the group mean; negative if below; zero if all K
+completions got the same reward.
+
+#### Plugging `b(s_i)` into the PG estimator
+
+Take §10.2's importance-weighted estimator and substitute `r → Â`:
+
+$$
+\nabla_\theta J(\theta) \approx \frac{1}{NK} \sum_{i=1}^{N}\sum_{k=1}^{K} \frac{\pi_\theta(a_k|s_i)}{\bar\pi(a_k|s_i)} \cdot \nabla_\theta \log \pi_\theta(a_k|s_i) \cdot \underbrace{\bigl[r(s_i, a_k) - b(s_i)\bigr]}_{\hat A_k}
+$$
+
+Each `(s_i, a_k)` pair contributes one term. The reward `r(s_i, a_k)` is this
+completion's absolute reward; `b(s_i)` is the prompt-shared mean; their difference is the
+advantage.
+
+**In code** ([train/trainer.py:917-920](train/trainer.py#L917)):
+
+```python
+# rewards: shape (N*K,) — each completion's scalar r(s_i, a_k)
+# mean_grouped_rewards: shape (N*K,) — per-prompt mean b(s_i), broadcast across group
+advantages = rewards - mean_grouped_rewards
+# advantages[i*K + k] = r(s_i, a_k) - b(s_i) = Â_k
+```
+
+**One line of code. That's the entire GRPO baseline.**
+
+#### What `b(s_i)` REPLACES from the pre-2024 LLM RL pipeline
+
+So far we've said: `b(s)` is *some* state-dependent baseline. GRPO picks the group mean.
+But LLM RL had a `b(s)` before GRPO — it just used a *different* one. The question is:
+**what specific form of `b(s)` did the field use before GRPO, and why did GRPO's choice
+win?**
+
+Pre-GRPO answer: **a learned value function `V_φ(s_t)`**. It served the *same role*
+(state-dependent baseline subtracted from reward) — just a different way of computing it.
+
+##### What `V_φ` was
+
+- A **separate neural network** `V_φ`, conventionally the same architecture and size as
+  the policy (often initialized from the SFT model).
+- Input: state `s_t` (prompt + tokens generated so far).
+- Output: scalar — an estimate of expected future reward from `s_t`.
+- Trained alongside the policy by MSE against observed returns:
+
+$$
+\mathcal{L}_V(\phi) = \mathbb{E}\!\left[\bigl(V_\phi(s_t) - \hat R_t\bigr)^2\right]
+$$
+
+where `R̂_t` is some target return (observed or bootstrapped via GAE).
+
+- Advantage computed via **Generalized Advantage Estimation (GAE)** — a specific
+  formula for combining observed rewards with `V_φ` predictions:
+
+$$
+\hat A_t = \sum_{k=0}^{T-t} (\gamma\lambda)^k\, \delta_{t+k}, \qquad \delta_t = r_t + \gamma V_\phi(s_{t+1}) - V_\phi(s_t)
+$$
+
+Per-token advantages, bootstrapped through the value network.
+
+##### Cost of `V_φ`
+
+- **Memory**: training and backpropping through a neural net the size of the policy
+  → roughly 2× memory.
+- **Compute**: each training step does forward + backward on `V_φ` *and* the policy.
+- **Hyperparameters**: discount `γ`, GAE `λ`, value-loss coefficient, value-clip range.
+- **Stability**: value-loss instability is a well-known PPO pain point; a poorly-trained
+  `V_φ` poisons advantage estimates, which poisons the policy update.
+
+##### Same role, different implementation
+
+**Both `V_φ(s_t)` and `b(s_i)` play the identical role in the PG estimator**: a
+state-dependent baseline subtracted from reward to form the advantage. They're
+interchangeable in the math — the gradient estimator has the same shape either way.
+
+| Role | Pre-GRPO (PPO-RLHF) | GRPO |
+|---|---|---|
+| Formula for `b(s)` | Learned `V_φ(s)`, MSE loss | Sample mean `(1/K) Σ r(s, a_k)` |
+| Requires a separate neural network? | **Yes** (~size of policy) | **No** |
+| Extra hyperparameters | `γ`, `λ`, value-loss coef, value-clip | Just `K` |
+| Runtime cost per update step | +1 forward + backward on `V_φ` | `K×` more sampling per prompt |
+
+**GRPO replaces `V_φ(s)` with the group mean, as a specific choice of `b(s)`. Nothing
+else about the PG estimator changes.** The reward `r(s, a)` is computed the same way.
+The importance weighting is the same. The clipping is the same. The KL regularization
+is the same. Just the baseline changes.
+
+##### Trade-off in one sentence
+
+**GRPO trades an expensive value network for more rollouts per prompt.** You pay in
+sampling cost (K× more base-LLM forward passes); you save on training cost (no value
+network, no GAE).
+
+##### Why this trade works for LLM RL specifically
+
+Value-function machinery earns its cost when rewards are **dense per-step** and need to
+be propagated through the trajectory. For sparse, outcome-only rewards (math
+correctness, code-ran-or-not), per-token value estimates don't add much — the key
+question is *"how good is this completion compared to peers for the same prompt?"*, and
+the group mean captures that directly.
+
+With dense per-step rewards, `V_φ` would still win. For the GRPO regime, the group-mean
+baseline is simpler and empirically at least as effective.
+
+#### One small nuance (skippable)
+
+The strict unbiasedness proof from §7.1 required `b` to not depend on the action being
+evaluated. GRPO's `b(s_i) = (1/K) Σ_{k'} r(s_i, a_{k'})` **includes** `r(s_i, a_k)`
+itself in the mean — so `b` technically depends on `a_k`. This introduces an `O(1/K)`
+bias.
+
+At `K = 8`, the bias is small and everyone ignores it. A strictly-unbiased
+**leave-one-out** version would be `b_k(s_i) = (1/(K-1)) Σ_{k' ≠ k} r(s_i, a_{k'})` —
+some implementations use this; the original GRPO paper does not. In practice both work
+similarly.
+
+### 10.4 Reference-model KL regularization
+
+Orthogonal to the baseline choice: when the reward is a **learned model** `r_ψ` (as in
+RLHF), the policy can learn to exploit quirks in `r_ψ` — generating nonsense that the
+reward model happens to rate highly ("reward hacking"). Standard fix: penalize
+divergence from a trusted reference policy `π_ref` (usually the SFT model we started
+from):
+
+$$
+\bar r(s, a) = r_\psi(s, a) - \beta\, D_{\mathrm{KL}}\bigl(\pi_\theta(a|s) \,\|\, \pi_{\text{ref}}(a|s)\bigr)
+$$
+
+Not relevant in verifiable-reward settings (math, code) because there's no reward model
+to exploit — the reward is the ground-truth check. But it's a standard piece of RLHF
+machinery.
+
+### 10.5 Why this matters for our project
+
+- **GRPO fits the "sparse, verifiable reward" regime exactly** — our reward is
+  `R_correct + α · R_efficiency`, no learned reward model.
+- **Saving the value network is what makes our setup tractable**: we're training a
+  <1M-param policy on top of a frozen 8B LLaDA. Adding another 8B value network would
+  blow up the compute budget. GRPO lets us skip it.
+- **The trade-off lands in our favor**: we already pay heavily for sampling (each
+  rollout = 64 LLaDA forward passes). Paying `K = 8` of those per prompt is manageable;
+  training a value network on top would not be.
 
 ---
 
