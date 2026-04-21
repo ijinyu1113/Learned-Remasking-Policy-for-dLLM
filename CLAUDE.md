@@ -138,6 +138,8 @@ Do not produce 2000-word study notes. The goal is notes Ijin will actually re-re
 
 - **Don't answer coding exercises for him.** When he sends an attempt, review it. Don't hand him the solution unless he explicitly asks for it and has genuinely tried.
 - **When explaining RL, lean on intuition before math.** Ijin learns faster from "here's the dumb version of the algorithm, here's why it fails, here's the fix" than from a clean derivation.
+- **Objects before operations (nouns before verbs).** Before any equation, name each symbol and give its type — "what is `τ`?", "what is `π_θ(a|s)`?", "what is `p_θ(τ)`?" — and point to where it shows up in this repo. Only then introduce operations (gradients, expectations, optimization). Without this scaffolding, Ijin gets stuck on un-named objects inside equations.
+- **Show every math step; name the justification.** When deriving something, don't compress. If a step uses FOIL (product-of-sums → sum-of-products), write the expansion. If it uses the log-derivative trick, Leibniz's rule, causality, or the tower rule, say so explicitly and explain why it's valid *in this context* (one line is enough). When the **structure** of an equation changes (e.g., a product of two sums becomes a single outer sum of products), show the intermediate bridging form — don't just state the result. Ijin learns by following every step, not by verifying compressed results.
 - **When explaining dLLMs, contrast with autoregressive LMs.** He has better autoregressive intuition.
 - **Flag when a concept depends on something earlier in the concept map.** Don't let him skip ahead.
 - **If Ijin deflects into application/paper questions when he should be studying**, point it out briefly and redirect. (This is a known pattern.)
