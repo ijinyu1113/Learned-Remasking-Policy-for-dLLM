@@ -62,15 +62,24 @@ def compute_grpo_advantages(rewards: torch.Tensor, group_size: int) -> torch.Ten
     :return: (G,) tensor of advantages. Entry i*K+k equals rewards[i*K+k] minus
         the mean of rewards[i*K : i*K + K].
     """
-    # TODO: implement
+    # Solution — mirrors the repo's approach at train/trainer.py:918-920.
     #
-    # Rough shape of the solution (3 ops):
-    #   1. Reshape rewards from (G,) to (num_prompts, K).
-    #   2. Compute the per-prompt mean along dim=1 -> (num_prompts,).
-    #   3. Broadcast the mean back to (G,) via repeat_interleave, then subtract.
-    #
-    raise NotImplementedError("Delete this line and implement the function.")
+    # Shape flow:
+    #   rewards  (G,)
+    #     .view(-1, K)           → (N, K)
+    #     .mean(dim=1)           → (N,)   per-prompt mean
+    #     .repeat_interleave(K)  → (G,)   broadcast mean back, aligned with rewards
+    #   rewards - mean_broadcast → (G,)   per-completion advantage
+    rewards_2d = rewards.view(-1, group_size)                     # (N, K)
+    mean_per_prompt = rewards_2d.mean(dim=1)                      # (N,)
+    mean_broadcast = mean_per_prompt.repeat_interleave(group_size)  # (G,)
+    return rewards - mean_broadcast                               # (G,)
 
+    # Equivalent alternative using broadcasting instead of repeat_interleave:
+    #
+    #     rewards_2d = rewards.view(-1, group_size)      # (N, K)
+    #     mean = rewards_2d.mean(dim=1, keepdim=True)    # (N, 1) — keepdim is the trick
+    #     return (rewards_2d - mean).view(-1)            # (N, K) broadcast, flatten to (G,)
 
 # ==============================================================================
 # Tests — run this file to check your implementation.
@@ -84,7 +93,7 @@ if __name__ == "__main__":
     actual = compute_grpo_advantages(rewards, group_size=2)
     assert actual.shape == expected.shape, (
         f"Test 1 shape: expected {expected.shape}, got {actual.shape}"
-    )
+    ) 
     assert torch.allclose(actual, expected), (
         f"Test 1 values: expected {expected.tolist()}, got {actual.tolist()}"
     )
@@ -143,4 +152,4 @@ if __name__ == "__main__":
     )
     print("Test 6 passed — baseline includes current completion (non-LOO)")
 
-    print("\n✓ All tests passed. Paste your implementation back to Claude for review.")
+    print("\n[OK] All tests passed. Paste your implementation back to Claude for review.")
