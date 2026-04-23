@@ -142,8 +142,13 @@ def generate_unified(
             block_mask_index = mask_index[:, block_index]  # (B, BL)
 
             if sampling_mode == "three_way":
-                # Break only after a policy pass where nothing happened.
-                if last_step_idle:
+                # Break only when the block is FULLY unmasked AND the policy
+                # voted no-op last pass. This mirrors 2-way's "keep going until
+                # everything is unmasked" guarantee, while still giving the policy
+                # the option to remask a completed block and then decide it's done.
+                # Prevents the early-termination failure mode where a KEEP-heavy
+                # policy at t≈1.0 would idle-break before any tokens unmasked.
+                if (~block_mask_index).all() and last_step_idle:
                     break
             else:
                 if (~block_mask_index).all():

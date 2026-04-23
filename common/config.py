@@ -161,6 +161,15 @@ class Config(GRPOConfig):
         },
     )
 
+    entropy_coef: float = field(
+        default=0.0,
+        metadata={
+            "help": "Entropy bonus coefficient. Subtracts entropy_coef * mean_policy_entropy "
+            "from the loss so the optimizer rewards high-entropy (exploratory) policies. "
+            "Set to 0.0 to disable. Common values: 0.001 - 0.01."
+        },
+    )
+
     dpls_stop_logit: float = field(
         default=0.0,
         metadata={

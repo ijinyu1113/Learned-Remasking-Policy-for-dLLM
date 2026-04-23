@@ -344,12 +344,16 @@ class Trainer(GRPOTrainer):
         # final loss is average over the group
         loss = loss_acummulator / sum(group_batch_sizes)
 
-        # Log entropy if collected
+        # Log entropy if collected; optionally add entropy bonus to the loss.
         if entropy_accumulator:
             mean_entropy = torch.stack(entropy_accumulator).mean()
             self._metrics["train"]["entropy"].append(
                 self.accelerator.gather_for_metrics(mean_entropy).mean().item()
             )
+            entropy_coef = getattr(self.args, "entropy_coef", 0.0)
+            if entropy_coef and entropy_coef > 0.0:
+                # Subtract because loss is minimized but entropy should be maximized.
+                loss = loss - entropy_coef * mean_entropy
 
         return loss
 
