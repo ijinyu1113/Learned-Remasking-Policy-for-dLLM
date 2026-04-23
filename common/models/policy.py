@@ -144,7 +144,7 @@ class DiTHiddenStatePolicy(nn.Module):
                 # policy starts with ~5% remask probability per step — enough for GRPO
                 # to receive training signal on remask actions.
                 self.output_proj.bias.data = torch.tensor(
-                    [target_logit, 0.0, -3.0],
+                    [target_logit, 0.0, -4.0],
                     dtype=self.output_proj.bias.dtype,
                     device=self.output_proj.bias.device,
                 )
@@ -273,7 +273,7 @@ class DiTConfidencePolicy(nn.Module):
             elif self.num_actions == 3:
                 # 3-way convention: [UNMASK, KEEP, REMASK]
                 self.output_proj.bias.data = torch.tensor(
-                    [target_logit, 0.0, -3.0],
+                    [target_logit, 0.0, -4.0],
                     dtype=self.output_proj.bias.dtype,
                     device=self.output_proj.bias.device,
                 )

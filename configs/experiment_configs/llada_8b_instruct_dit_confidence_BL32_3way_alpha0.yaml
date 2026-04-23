@@ -78,4 +78,4 @@ sampling_mode: three_way
 num_policy_actions: 3
 alpha_compute_reward: 0.0
 alpha_correctness_reward: 1.0
-entropy_coef: 0.01
+entropy_coef: 0.003
