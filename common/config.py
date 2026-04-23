@@ -170,6 +170,16 @@ class Config(GRPOConfig):
         },
     )
 
+    warm_start_policy_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "If set, load policy weights from this .safetensors file before training. "
+            "Only the policy weights are loaded (no optimizer/scheduler state), so training "
+            "starts from global_step=0 with fresh optimizer. Useful for warm-starting a 3-way "
+            "policy from a trained 2-way checkpoint (see scripts/warm_start_3way_from_2way.py)."
+        },
+    )
+
     dpls_stop_logit: float = field(
         default=0.0,
         metadata={

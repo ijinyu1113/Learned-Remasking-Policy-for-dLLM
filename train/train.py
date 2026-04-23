@@ -225,6 +225,20 @@ def main(grpo_config, model_config):
 
     policy = PolicyHFWrapper(policy_core, grpo_config.policy_type)
 
+    # Optional warm-start: load pretrained weights without resume semantics.
+    if grpo_config.warm_start_policy_path:
+        from safetensors.torch import load_file as _load_safetensors
+        ws_path = grpo_config.warm_start_policy_path
+        print(f"=== Warm-starting policy from {ws_path} ===")
+        ws_state = _load_safetensors(ws_path)
+        missing, unexpected = policy.load_state_dict(ws_state, strict=False)
+        if missing:
+            print(f"  Warm-start missing keys (left at init): {len(missing)} "
+                  f"e.g. {missing[:3]}")
+        if unexpected:
+            print(f"  Warm-start unexpected keys (ignored): {len(unexpected)} "
+                  f"e.g. {unexpected[:3]}")
+
     # Log policy parameter count
     total_params = sum(p.numel() for p in policy_core.parameters())
     trainable_params = sum(
