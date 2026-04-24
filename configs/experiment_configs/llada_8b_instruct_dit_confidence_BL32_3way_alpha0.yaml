@@ -61,6 +61,10 @@ beta: 0.
 epsilon: 0.5
 num_iterations: 2
 loglikelihood_dtype: float32
+# Chunks the T (denoising-step) dimension inside compute_loss's policy forward.
+# Pure memory knob - does not change gradients. Required for 3-way on A100-40GB
+# because the (B, T, L, 3) intermediates from warm-started rollouts blow up SDPA.
+timestep_batch_size: 16
 
 # Policy specific
 policy_type: dit_confidence
