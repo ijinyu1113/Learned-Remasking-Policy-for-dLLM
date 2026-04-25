@@ -439,9 +439,9 @@ class Trainer(GRPOTrainer):
             elif sampling_mode == "three_way":
                 entropy = categorical_entropy(constrained_logits, mask_index=sampling_masks)
 
-        del logits
-        if constrained_logits is not None and constrained_logits is not logits:
+        if constrained_logits is not logits:
             del constrained_logits
+        del logits
         torch.cuda.empty_cache()
 
         if return_entropy:
