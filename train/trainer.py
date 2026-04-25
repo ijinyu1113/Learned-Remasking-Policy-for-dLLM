@@ -379,11 +379,22 @@ class Trainer(GRPOTrainer):
         with torch.amp.autocast("cuda", enabled=self.args.fp16):
             logits = model(*policy_inputs)  # (B, T, BL)
 
+        # For 3-way, re-apply the SAME constraints used at sampling time so that
+        # the new log-prob is computed on the same distribution as the stored old
+        # log-prob. Without this, the PPO importance ratio is biased and gradients
+        # point in the wrong direction.
+        if sampling_mode == "three_way":
+            constrained_logits = self._apply_three_way_constraints(
+                logits, policy_inputs, sampling_masks
+            )
+        else:
+            constrained_logits = logits
+
         # Calculate corresponding log-likelihoods under the model
         if sampling_mode == "dpls":
             lls = dpls_batch_loglik(
                 samples=samples,
-                utilities=logits,
+                utilities=constrained_logits,
                 stop_logit=self.args.dpls_stop_logit,
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
@@ -391,17 +402,14 @@ class Trainer(GRPOTrainer):
         elif sampling_mode in ["bernoulli", "bernoulli-argmax"]:
             lls = bernoulli_batch_loglik(
                 samples,
-                logits,
+                constrained_logits,
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
             )
         elif sampling_mode == "three_way":
-            # Re-apply the action-validity mask to the freshly-computed logits.
-            # During rollout we stored constrained logits on the old-policy side; here
-            # we reconstruct the same constraints from the sampled state.
             lls = categorical_batch_loglik(
                 samples=samples,
-                utilities=logits,
+                utilities=constrained_logits,
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
             )
@@ -413,7 +421,7 @@ class Trainer(GRPOTrainer):
         if return_entropy:
             if sampling_mode in ["bernoulli", "bernoulli-argmax"]:
                 # For Bernoulli: H = -p*log(p) - (1-p)*log(1-p)
-                probs_clamped = torch.sigmoid(logits).clamp(1e-8, 1 - 1e-8)
+                probs_clamped = torch.sigmoid(constrained_logits).clamp(1e-8, 1 - 1e-8)
                 entropy = -(
                     probs_clamped * torch.log(probs_clamped)
                     + (1 - probs_clamped) * torch.log(1 - probs_clamped)
@@ -422,21 +430,95 @@ class Trainer(GRPOTrainer):
                 active_mask = sampling_masks.float()
                 entropy = (entropy * active_mask).sum() / active_mask.sum()
             elif sampling_mode == "dpls":
-                masked_logits = logits.masked_fill(~sampling_masks, float("-inf"))
+                masked_logits = constrained_logits.masked_fill(~sampling_masks, float("-inf"))
                 probs = torch.softmax(masked_logits, dim=-1)
                 probs_clamped = probs.clamp(1e-8, 1.0)
                 entropy = -(probs * torch.log(probs_clamped)).sum(dim=-1)
                 active_mask = sampling_masks.any(dim=-1).float()
                 entropy = (entropy * active_mask).sum() / active_mask.sum()
             elif sampling_mode == "three_way":
-                entropy = categorical_entropy(logits, mask_index=sampling_masks)
+                entropy = categorical_entropy(constrained_logits, mask_index=sampling_masks)
 
         del logits
+        if constrained_logits is not None and constrained_logits is not logits:
+            del constrained_logits
         torch.cuda.empty_cache()
 
         if return_entropy:
             return lls, entropy
         return lls
+
+    def _apply_three_way_constraints(
+        self,
+        logits: torch.Tensor,
+        policy_inputs,
+        sampling_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reconstruct the constrained 3-way logits used at sampling time.
+
+        Mirrors the constraint construction in
+        ``common.generation.generation._policy_three_way_decisions``:
+          1. Subtract the confidence-aware REMASK prior (-5 * conf_top1).
+          2. Force REMASK invalid (-inf) at masked positions.
+          3. Force UNMASK invalid (-inf) at unmasked positions.
+          4. Force UNMASK and REMASK invalid (-inf) outside the sampling mask.
+
+        These constraints depend only on the rollout state, NOT on the policy
+        parameters, so they have zero gradient. But they DO affect the softmax
+        denominator used by `categorical_batch_loglik`, so they must be applied
+        consistently between sampling-time (old log-prob) and training-time
+        (new log-prob) for the PPO importance ratio to be unbiased.
+
+        :param logits: (B, T, L, 3) raw policy logits from a fresh forward pass.
+        :param policy_inputs: tuple stored at sampling time.
+            For ``dit_confidence``: (policy_mask (B,T,L), c_max_input (B,T,L,top_p), timestep).
+            For ``dit_hidden``: (policy_mask, hidden_states, timestep) -- no conf info,
+                so the conf prior is skipped.
+        :param sampling_masks: (B, T, L) bool — positions where the policy acted.
+        :return: constrained (B, T, L, 3) logits with same shape as input.
+        """
+        constrained = logits.clone()
+
+        # policy_inputs[0] is the mask info passed to the policy at sampling time.
+        # For full_context=True (the only case currently supported), this equals
+        # is_masked (which positions had [MASK] tokens) at the corresponding step.
+        is_masked = policy_inputs[0].bool()  # (B, T, L)
+
+        neg_inf_unmask = torch.full_like(constrained[..., ACTION_UNMASK], float("-inf"))
+        neg_inf_remask = torch.full_like(constrained[..., ACTION_REMASK], float("-inf"))
+
+        # 1. Confidence-aware REMASK prior (only for dit_confidence path).
+        # policy_inputs[1] for dit_confidence is c_max_input shape (B, T, L, top_p).
+        REMASK_CONF_PRIOR = 5.0
+        c_input = policy_inputs[1] if len(policy_inputs) >= 2 else None
+        if (
+            isinstance(c_input, torch.Tensor)
+            and c_input.dim() == 4
+            and c_input.shape[:3] == constrained.shape[:3]
+            and c_input.shape[-1] >= 1
+        ):
+            conf_max = c_input[..., 0]  # (B, T, L)
+            constrained[..., ACTION_REMASK] = (
+                constrained[..., ACTION_REMASK] - REMASK_CONF_PRIOR * conf_max
+            )
+
+        # 2. REMASK invalid at masked positions.
+        constrained[..., ACTION_REMASK] = torch.where(
+            is_masked, neg_inf_remask, constrained[..., ACTION_REMASK]
+        )
+        # 3. UNMASK invalid at unmasked positions.
+        constrained[..., ACTION_UNMASK] = torch.where(
+            ~is_masked, neg_inf_unmask, constrained[..., ACTION_UNMASK]
+        )
+        # 4. Outside sampling_mask, only KEEP is valid.
+        outside = ~sampling_masks
+        constrained[..., ACTION_UNMASK] = torch.where(
+            outside, neg_inf_unmask, constrained[..., ACTION_UNMASK]
+        )
+        constrained[..., ACTION_REMASK] = torch.where(
+            outside, neg_inf_remask, constrained[..., ACTION_REMASK]
+        )
+        return constrained
 
     def _log_three_way_metrics(
         self,
