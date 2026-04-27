@@ -25,12 +25,14 @@ After fixing the PPO ratio bug (commit `e48bb20`), the **v8** run combines:
 3. **Entropy bonus** (`entropy_coef: 0.001`) — toggled ON/OFF in this ablation
 4. **3-way termination rule** (loop terminates only when block fully unmasked AND policy idle) — kept in ALL ablations
 
-Reported v8 numbers (50-sample GSM8K screening):
+Reported v8 numbers (50-sample GSM8K screening; full eval pending):
 
-| Checkpoint | Accuracy | Avg NFE |
+| Checkpoint | Accuracy (50-sample) | Avg NFE |
 |---|---|---|
 | 1000 | 66.00% | 211 |
 | 2000 | 64.00% | 68 |
+
+Final paper numbers will come from full 1319-problem GSM8K evals on the same checkpoints.
 
 ---
 
@@ -69,14 +71,30 @@ sleep 15
 tmux attach -t a2
 ```
 
-**Eval at ckpt 1000:**
+**Full GSM8K eval at ckpt 1000 (1319 problems, ~2-3 hrs on a free A100):**
 
 ```bash
+# Optional fast screening first (50 problems, ~5 min) to spot-check
 python -m eval.pipeline outputs/3way_a2_cold_no_entropy \
   configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_3way_alpha0_no_entropy.yaml \
   --checkpoints 1000 --datasets gsm8k --seeds 42 --temperatures 1.0 \
   --save_path eval_results/3way_a2_screening --n_test 50 2>&1 \
   | grep -E "Accuracy:|Avg NFEs:"
+
+# Full eval — PUT IN TMUX, takes 2-3 hrs
+tmux new -s eval_a2 -d "cd ~/Learned-Remasking-Policy-for-dLLM && bash -c '
+source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate rldllm
+python -m eval.pipeline outputs/3way_a2_cold_no_entropy \
+  configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_3way_alpha0_no_entropy.yaml \
+  --checkpoints 1000 --datasets gsm8k --seeds 42 --temperatures 1.0 \
+  --save_path eval_results/3way_a2_full
+' 2>&1 | tee eval_a2_full.log"
+```
+
+The full eval's results land in `eval_results/3way_a2_full/...` and the
+aggregator prints accuracy + NFE. To re-extract:
+```bash
+python -m eval.aggregate_results --results_dir eval_results/3way_a2_full
 ```
 
 **What to expect:**
@@ -120,14 +138,27 @@ sleep 15
 tmux attach -t a3
 ```
 
-**Eval at ckpt 1000:**
+**Full GSM8K eval at ckpt 1000 (1319 problems, ~2-3 hrs):**
 
 ```bash
+# Optional 50-problem screening
 python -m eval.pipeline outputs/3way_a3_cold_with_entropy \
   configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_3way_alpha0.yaml \
   --checkpoints 1000 --datasets gsm8k --seeds 42 --temperatures 1.0 \
   --save_path eval_results/3way_a3_screening --n_test 50 2>&1 \
   | grep -E "Accuracy:|Avg NFEs:"
+
+# Full eval — TMUX, 2-3 hrs
+tmux new -s eval_a3 -d "cd ~/Learned-Remasking-Policy-for-dLLM && bash -c '
+source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate rldllm
+python -m eval.pipeline outputs/3way_a3_cold_with_entropy \
+  configs/experiment_configs/llada_8b_instruct_dit_confidence_BL32_3way_alpha0.yaml \
+  --checkpoints 1000 --datasets gsm8k --seeds 42 --temperatures 1.0 \
+  --save_path eval_results/3way_a3_full
+' 2>&1 | tee eval_a3_full.log"
+
+# Re-extract numbers later:
+python -m eval.aggregate_results --results_dir eval_results/3way_a3_full
 ```
 
 **What to expect (relative to A2):**
@@ -137,27 +168,31 @@ python -m eval.pipeline outputs/3way_a3_cold_with_entropy \
 
 ---
 
-## Suggested order
+## Suggested order (3-day plan, tight)
 
-Day 1 morning → kick off **A2** (most naive, the baseline number we'll subtract from).
-Day 1 evening → A2 should be at ~ckpt 700+. Screen at whatever it hits in 12 hr if needed.
-Day 2 morning → kick off **A3** after A2 finishes.
-Day 2 evening → A3 at ckpt 1000.
-Day 3 → analysis, write Results section with the 3-way ablation table.
+Day 1 morning → kick off **A2** training (most naive baseline). ~24 hr.
+Day 1 evening → optional 50-problem screening on whatever ckpt A2 has reached.
+Day 2 morning → A2 at ckpt 1000. Kill training. Start full eval on A2 ckpt 1000 (~3 hr).
+                In parallel (after eval finishes): kick off **A3** training. ~24 hr.
+Day 3 morning → A3 at ckpt 1000. Kill training. Start full eval on A3 ckpt 1000 (~3 hr).
+                Also start full eval on **v8** ckpt 1000 if not done already.
+Day 3 afternoon → fill in the 4-row table. Write Results section.
+
+If timing is brutal: skip the 50-problem screenings and go straight to full eval — it's
+cleaner anyway since the paper number will come from full eval.
 
 ---
 
 ## Final results table for the paper
 
-After both ablations finish, populate this table (all 50-sample GSM8K screening at
-ckpt 1000):
+All numbers below are from **full 1319-problem GSM8K eval** at ckpt 1000:
 
 | Method                            | Warm-start | Entropy | Accuracy | NFE | Notes                |
 |-----------------------------------|------------|---------|----------|-----|----------------------|
-| 2-way ckpt 700 (best)             | -          | -       | 74%      | ~145| Baseline (Apple)     |
+| 2-way ckpt 700 (best)             | -          | -       | _____    | ___ | Baseline (Apple)     |
 | 3-way A2 (cold, no entropy)       |            |         | _____    | ___ | "naive 3-way"        |
 | 3-way A3 (cold, with entropy)     |            | ✓       | _____    | ___ | + entropy            |
-| 3-way v8 (full)                   | ✓          | ✓       | 66%      | 211 | + warmstart + entropy|
+| 3-way v8 (full)                   | ✓          | ✓       | _____    | ___ | + warmstart + entropy|
 
 The deltas isolate each design choice's contribution:
 - **A3 − A2** = entropy bonus contribution (cold-start setting)
@@ -182,5 +217,5 @@ If something does break:
 - Ablating the conf prior: would be informative but takes another full day; mention as
   "left for future work."
 - Lower entropy coefficients (0.0001, 0.005): too noisy to detect in 1000 steps with
-  50-sample eval.
+  the 1319-problem GSM8K eval (~3pp standard error).
 - Different warm-start checkpoints (ckpt 500, 2000): tangential to the main claim.
