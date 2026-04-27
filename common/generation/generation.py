@@ -142,8 +142,13 @@ def generate_unified(
             block_mask_index = mask_index[:, block_index]  # (B, BL)
 
             if sampling_mode == "three_way":
-                # Break only after a policy pass where nothing happened.
-                if last_step_idle:
+                # Break only when the block is FULLY unmasked AND the policy
+                # voted no-op last pass. This mirrors 2-way's "keep going until
+                # everything is unmasked" guarantee, while still giving the policy
+                # the option to remask a completed block and then decide it's done.
+                # Prevents the early-termination failure mode where a KEEP-heavy
+                # policy at t≈1.0 would idle-break before any tokens unmasked.
+                if (~block_mask_index).all() and last_step_idle:
                     break
             else:
                 if (~block_mask_index).all():
@@ -571,6 +576,21 @@ def _policy_three_way_decisions(
     is_masked = (generation_part == mask_id)  # (B, L)
     # Clone to avoid mutating caller tensors
     constrained_logits = policy_logits_full.clone()
+
+    # Confidence-aware REMASK prior: suppress remasking of tokens that the base
+    # model is confident about. At an unmasked position, we add -REMASK_CONF_PRIOR
+    # * (top-1 confidence) to the REMASK logit. A token with conf=1.0 gets its
+    # remask logit shifted down by REMASK_CONF_PRIOR; a token with conf=0 is
+    # unaffected. This is a structural prior that encodes the assumption
+    # "high base-model confidence => token is likely correct => don't throw it
+    # away." The policy can still learn to override this prior via its own
+    # features; this just stops a randomly-initialized remask head from
+    # indiscriminately destroying coherent outputs before reward signal arrives.
+    REMASK_CONF_PRIOR = 5.0
+    conf_max_full = probs.max(dim=-1).values  # (B, L_full) model top-1 confidence
+    constrained_logits[..., ACTION_REMASK] = (
+        constrained_logits[..., ACTION_REMASK] - REMASK_CONF_PRIOR * conf_max_full
+    )
     # At masked positions, REMASK invalid
     constrained_logits[..., ACTION_REMASK] = torch.where(
         is_masked, torch.full_like(constrained_logits[..., ACTION_REMASK], float("-inf")),

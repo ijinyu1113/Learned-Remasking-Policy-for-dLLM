@@ -1,13 +1,18 @@
-# 3-way (unmask / keep / remask) learned policy on LLaDA-8B-Instruct, BL=32.
-# alpha_compute_reward=0.0 -> accuracy-only objective (no efficiency term).
-# ModelConfig
+# Ablation A3: same as the main 3-way config except entropy_coef=0.0.
+# Tests whether the entropy bonus contributes to convergence beyond what
+# warm-starting + the conf-aware REMASK prior already provide.
+#
+# Compare against:
+#   - configs/.../BL32_3way_alpha0.yaml (same setup but entropy_coef=0.001)
+#
+# Run with --warm_start_policy_path to match v8's other conditions:
+#   accelerate launch ... --config <this file> --warm_start_policy_path outputs/warmstart_init/model.safetensors
 torch_dtype: bfloat16
 load_in_4bit: false
 model_path: GSAI-ML/LLaDA-8B-Instruct
 
 attn_implementation: sdpa
 
-# GRPOConfig
 dataset: gsm8k_and_math
 seed: 123
 bf16: false
@@ -43,15 +48,12 @@ gradient_checkpointing: false
 gradient_checkpointing_kwargs:
   use_reentrant: false
 
-# Preemption-safe: auto-resume enabled; small save interval so preempts lose <1.5% of work
 resume_from_checkpoint: true
 
-# Parameters for saving checkpoints
 save_steps: 50
 save_strategy: steps
 save_total_limit: 500
 
-# Diffusion and GRPO-specific
 max_completion_length: 256
 max_prompt_length: 200
 block_length: 32
@@ -61,12 +63,8 @@ beta: 0.
 epsilon: 0.5
 num_iterations: 2
 loglikelihood_dtype: float32
-# Chunks the T (denoising-step) dimension inside compute_loss's policy forward.
-# Pure memory knob - does not change gradients. Required for 3-way on A100-40GB
-# because the (B, T, L, 3) intermediates from warm-started rollouts blow up SDPA.
 timestep_batch_size: 16
 
-# Policy specific
 policy_type: dit_confidence
 policy_hidden_dim: 128
 policy_feedforward_dim: 512
@@ -77,9 +75,9 @@ policy_time_embed_dim: 128
 policy_full_context: true
 policy_smart_init: -2.0
 
-# ===== 3-way specific =====
 sampling_mode: three_way
 num_policy_actions: 3
 alpha_compute_reward: 0.0
 alpha_correctness_reward: 1.0
-entropy_coef: 0.001
+# Ablation knob: NO entropy regularization on the policy distribution.
+entropy_coef: 0.0

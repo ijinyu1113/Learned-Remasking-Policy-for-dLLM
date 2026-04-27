@@ -161,6 +161,25 @@ class Config(GRPOConfig):
         },
     )
 
+    entropy_coef: float = field(
+        default=0.0,
+        metadata={
+            "help": "Entropy bonus coefficient. Subtracts entropy_coef * mean_policy_entropy "
+            "from the loss so the optimizer rewards high-entropy (exploratory) policies. "
+            "Set to 0.0 to disable. Common values: 0.001 - 0.01."
+        },
+    )
+
+    warm_start_policy_path: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": "If set, load policy weights from this .safetensors file before training. "
+            "Only the policy weights are loaded (no optimizer/scheduler state), so training "
+            "starts from global_step=0 with fresh optimizer. Useful for warm-starting a 3-way "
+            "policy from a trained 2-way checkpoint (see scripts/warm_start_3way_from_2way.py)."
+        },
+    )
+
     dpls_stop_logit: float = field(
         default=0.0,
         metadata={
