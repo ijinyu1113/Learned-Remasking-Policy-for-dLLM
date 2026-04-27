@@ -47,7 +47,7 @@ entropy regularization?
 
 ```bash
 cd ~/Learned-Remasking-Policy-for-dLLM
-git checkout ijin && git pull origin ijin
+git checkout main && git pull origin main
 
 # Pause v8 if running
 tmux kill-session -t train3way 2>/dev/null
@@ -114,7 +114,7 @@ python -m eval.aggregate_results --results_dir eval_results/3way_a2_full
 
 ```bash
 cd ~/Learned-Remasking-Policy-for-dLLM
-git pull origin ijin
+git pull origin main
 
 tmux kill-session -t train3way 2>/dev/null
 tmux kill-session -t a2 2>/dev/null
