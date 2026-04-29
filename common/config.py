@@ -147,8 +147,34 @@ class Config(GRPOConfig):
         default="bernoulli",
         metadata={
             "help": "Type of sampling strategy to use. Options: "
-            "['bernoulli', 'bernoulli-argmax', 'dpls', 'three_way']. "
-            "'three_way' runs the 3-action (unmask/keep/remask) categorical policy."
+            "['bernoulli', 'bernoulli-argmax', 'dpls', 'three_way', 'two_way_setstate']. "
+            "'three_way' runs the 3-action (unmask/keep/remask) categorical policy. "
+            "'two_way_setstate' runs the Bernoulli set-state policy: at every "
+            "block position the policy samples a target state in {masked, unmasked} "
+            "and the effect (reveal/remask/no-op) depends on the current state."
+        },
+    )
+
+    setstate_remask_conf_prior: float = field(
+        default=0.0,
+        metadata={
+            "help": "Confidence-aware prior coefficient for sampling_mode="
+            "'two_way_setstate'. At unmasked positions the Bernoulli logit is "
+            "shifted by `setstate_remask_conf_prior * top1_conf`, raising the "
+            "probability of 'set to UNMASKED' (i.e. suppressing remasking) at "
+            "high-confidence tokens. 0 disables the prior entirely; 5.0 mirrors "
+            "the 3-way REMASK_CONF_PRIOR. Applied identically at sampling and "
+            "loss time so the PPO ratio stays unbiased."
+        },
+    )
+
+    prob_n_freqs: int = field(
+        default=8,
+        metadata={
+            "help": "Number of frequencies in the Fourier lift used to embed "
+            "probability scalars (top-K conf and p_current) for "
+            "policy_type='dit_confidence_pcurrent'. Each lifted channel has "
+            "shape (..., 2*prob_n_freqs)."
         },
     )
 

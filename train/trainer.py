@@ -387,6 +387,10 @@ class Trainer(GRPOTrainer):
             constrained_logits = self._apply_three_way_constraints(
                 logits, policy_inputs, sampling_masks
             )
+        elif sampling_mode == "two_way_setstate":
+            constrained_logits = self._apply_two_way_setstate_constraints(
+                logits, policy_inputs, sampling_masks
+            )
         else:
             constrained_logits = logits
 
@@ -399,7 +403,7 @@ class Trainer(GRPOTrainer):
                 mask_index=sampling_masks,
                 dtype=self.args.loglikelihood_dtype,
             )
-        elif sampling_mode in ["bernoulli", "bernoulli-argmax"]:
+        elif sampling_mode in ["bernoulli", "bernoulli-argmax", "two_way_setstate"]:
             lls = bernoulli_batch_loglik(
                 samples,
                 constrained_logits,
@@ -419,7 +423,7 @@ class Trainer(GRPOTrainer):
         # Compute entropy if requested
         entropy = None
         if return_entropy:
-            if sampling_mode in ["bernoulli", "bernoulli-argmax"]:
+            if sampling_mode in ["bernoulli", "bernoulli-argmax", "two_way_setstate"]:
                 # For Bernoulli: H = -p*log(p) - (1-p)*log(1-p)
                 probs_clamped = torch.sigmoid(constrained_logits).clamp(1e-8, 1 - 1e-8)
                 entropy = -(
@@ -519,6 +523,51 @@ class Trainer(GRPOTrainer):
             outside, neg_inf_remask, constrained[..., ACTION_REMASK]
         )
         return constrained
+
+    def _apply_two_way_setstate_constraints(
+        self,
+        logits: torch.Tensor,
+        policy_inputs,
+        sampling_masks: torch.Tensor,
+    ) -> torch.Tensor:
+        """Reconstruct the constrained Bernoulli logits used at sampling time
+        for sampling_mode='two_way_setstate'. Mirrors the construction in
+        ``common.generation.two_way_setstate.apply_setstate_constraints`` so
+        that loss-time log-prob and sampling-time log-prob are computed over
+        the same Bernoulli denominators (PPO ratio unbiased).
+
+        :param logits: (B, T, L) raw Bernoulli logits from a fresh policy forward
+        :param policy_inputs: tuple stored at sampling time. For the
+            ``dit_confidence_pcurrent`` policy used with this sampling mode it is
+            ``(policy_mask (B,T,L), c_max_input (B,T,L,top_p), timestep (B,T,1),
+            p_current_input (B,T,L))``.
+        :param sampling_masks: (B, T, L) bool — positions where the policy acted.
+        :return: (B, T, L) constrained Bernoulli logits, same shape as ``logits``.
+        """
+        from common.generation.two_way_setstate import apply_setstate_constraints
+
+        is_masked = policy_inputs[0].bool()  # (B, T, L)
+        c_input = policy_inputs[1]  # (B, T, L, top_p)
+        # Top-1 conf is the first slot of the top-K conf input.
+        if not (
+            isinstance(c_input, torch.Tensor)
+            and c_input.dim() == 4
+            and c_input.shape[:3] == logits.shape
+            and c_input.shape[-1] >= 1
+        ):
+            raise ValueError(
+                f"two_way_setstate expects c_max_input shape (B,T,L,top_p>=1), "
+                f"got {None if not isinstance(c_input, torch.Tensor) else c_input.shape}"
+            )
+        conf_top1 = c_input[..., 0]  # (B, T, L)
+
+        return apply_setstate_constraints(
+            raw_logits=logits,
+            is_masked=is_masked,
+            conf_top1=conf_top1,
+            sampling_mask=sampling_masks,
+            remask_conf_prior=self.args.setstate_remask_conf_prior,
+        )
 
     def _log_three_way_metrics(
         self,
@@ -629,13 +678,122 @@ class Trainer(GRPOTrainer):
             (num_steps_policy.float().mean() / max(gen_length, 1)).item()
         )
 
+    def _log_two_way_setstate_metrics(
+        self,
+        policy_outputs_all: list[dict[str, Any]],
+        num_steps: torch.Tensor,
+        post_gathering_policy_only_index,
+        mode: str,
+        gen_length: int,
+    ) -> None:
+        """Compute + log training-time metrics specific to the 2-way set-state policy.
+
+        Bernoulli sample = "set state to UNMASKED" (True) vs "set state to MASKED"
+        (False). Action effect depends on current state, so we decompose by
+        (current_state, sampled_state):
+          * action_rate/unmask  = masked & sampled True  (reveal)
+          * action_rate/remask  = unmasked & sampled False (the new behavior)
+          * action_rate/keep    = either (masked & sampled False) | (unmasked & sampled True)
+
+        Metric names match the 3-way logging where semantics align, so existing
+        W&B dashboards' action-rate charts work for both runs.
+
+        Also logs:
+          * remask_rate/early/mid/late — by relative denoising progress
+          * remask_conf_mean — base-model conf at positions chosen for remasking
+            (with conf prior at 0 we expect this to be lower than the average
+            unmasked-token conf if the policy learns to target uncertain tokens)
+          * NFE mean/std/min/max
+        """
+        num_steps = self.accelerator.gather_for_metrics(num_steps).float()
+        unmask_count = torch.zeros(1, device=num_steps.device)
+        remask_count = torch.zeros(1, device=num_steps.device)
+        keep_count = torch.zeros(1, device=num_steps.device)
+        active_total = torch.zeros(1, device=num_steps.device)
+        early_remask = torch.zeros(1, device=num_steps.device)
+        early_active = torch.zeros(1, device=num_steps.device)
+        mid_remask = torch.zeros(1, device=num_steps.device)
+        mid_active = torch.zeros(1, device=num_steps.device)
+        late_remask = torch.zeros(1, device=num_steps.device)
+        late_active = torch.zeros(1, device=num_steps.device)
+        remask_conf_sum = torch.zeros(1, device=num_steps.device)
+        remask_conf_count = torch.zeros(1, device=num_steps.device)
+
+        for i in range(
+            len(policy_outputs_all) - (1 if self.args.es_thresholds else 0)
+        ):
+            samples = policy_outputs_all[i]["samples"].bool()  # (B, T, L) — True = "set to UNMASKED"
+            ms = policy_outputs_all[i]["sampling_masks"]  # (B, T, L) bool
+            policy_inputs = policy_outputs_all[i]["policy_inputs"]
+            policy_mask = policy_inputs[0].bool()  # (B, T, L) — True at currently-masked positions
+
+            B, T, L = samples.shape
+            active = ms
+            is_masked_active = active & policy_mask
+            is_unmasked_active = active & ~policy_mask
+
+            active_total += active.float().sum()
+            unmask_count += (is_masked_active & samples).float().sum()
+            remask_count += (is_unmasked_active & ~samples).float().sum()
+            keep_count += (
+                (is_masked_active & ~samples).float().sum()
+                + (is_unmasked_active & samples).float().sum()
+            )
+
+            t_idx = torch.arange(T, device=samples.device).view(1, T, 1).expand_as(samples)
+            early_buk = t_idx < (T // 3)
+            late_buk = t_idx >= (2 * T // 3)
+            mid_buk = ~(early_buk | late_buk)
+
+            remask_mask = is_unmasked_active & ~samples
+            early_remask += (remask_mask & early_buk).float().sum()
+            early_active += (active & early_buk).float().sum()
+            mid_remask += (remask_mask & mid_buk).float().sum()
+            mid_active += (active & mid_buk).float().sum()
+            late_remask += (remask_mask & late_buk).float().sum()
+            late_active += (active & late_buk).float().sum()
+
+            # Base-model top-1 conf at positions the policy chose to remask.
+            # policy_inputs[1] for dit_confidence_pcurrent is c_max_input (B,T,L,top_p).
+            if len(policy_inputs) >= 2 and isinstance(policy_inputs[1], torch.Tensor):
+                c_input = policy_inputs[1]
+                if c_input.dim() == 4 and c_input.shape[-1] >= 1:
+                    c_top1 = c_input[..., 0]
+                    if c_top1.shape == samples.shape and remask_mask.any():
+                        remask_conf_sum += c_top1[remask_mask].float().sum()
+                        remask_conf_count += remask_mask.float().sum()
+
+        def _safe_div(n, d):
+            return (n / d.clamp(min=1.0)).item()
+
+        action_total = active_total.clamp(min=1.0)
+        self._metrics[mode]["action_rate/unmask"].append((unmask_count / action_total).item())
+        self._metrics[mode]["action_rate/remask"].append((remask_count / action_total).item())
+        self._metrics[mode]["action_rate/keep"].append((keep_count / action_total).item())
+        self._metrics[mode]["remask_rate/early"].append(_safe_div(early_remask, early_active))
+        self._metrics[mode]["remask_rate/mid"].append(_safe_div(mid_remask, mid_active))
+        self._metrics[mode]["remask_rate/late"].append(_safe_div(late_remask, late_active))
+        if remask_conf_count.item() > 0:
+            self._metrics[mode]["remask_conf_mean"].append(
+                _safe_div(remask_conf_sum, remask_conf_count)
+            )
+
+        num_steps_policy = num_steps[post_gathering_policy_only_index]
+        self._metrics[mode]["num_steps_mean"].append(num_steps_policy.mean().item())
+        self._metrics[mode]["num_steps_std"].append(num_steps_policy.std().item())
+        self._metrics[mode]["num_steps_min"].append(num_steps_policy.min().item())
+        self._metrics[mode]["num_steps_max"].append(num_steps_policy.max().item())
+        self._metrics[mode]["nfe_per_token"].append(
+            (num_steps_policy.float().mean() / max(gen_length, 1)).item()
+        )
+
     def _compute_mask_loglikelihood(
         self,
         samples: torch.Tensor,
         sampling_inputs: torch.Tensor,
         sampling_masks: torch.Tensor,
     ) -> torch.Tensor:
-        if self.args.sampling_mode in ["bernoulli", "bernoulli-argmax"]:
+        if self.args.sampling_mode in ["bernoulli", "bernoulli-argmax", "two_way_setstate"]:
             return bernoulli_batch_loglik(
                 samples=samples,
                 utilities=sampling_inputs,
@@ -758,6 +916,7 @@ class Trainer(GRPOTrainer):
                         confidences_top_p=self.args.confidences_top_p,
                         model_type=self.args.model_type,
                         attention_mask=batch_prompt_mask,
+                        setstate_remask_conf_prior=self.args.setstate_remask_conf_prior,
                     )
 
                     # Extract values from NamedTuple
@@ -1123,6 +1282,14 @@ class Trainer(GRPOTrainer):
         # three-action metrics and skip the bernoulli-specific aggregations.
         if self.args.sampling_mode == "three_way":
             self._log_three_way_metrics(
+                policy_outputs_all=policy_outputs_all,
+                num_steps=num_steps,
+                post_gathering_policy_only_index=post_gathering_policy_only_index,
+                mode=mode,
+                gen_length=gen_length,
+            )
+        elif self.args.sampling_mode == "two_way_setstate":
+            self._log_two_way_setstate_metrics(
                 policy_outputs_all=policy_outputs_all,
                 num_steps=num_steps,
                 post_gathering_policy_only_index=post_gathering_policy_only_index,

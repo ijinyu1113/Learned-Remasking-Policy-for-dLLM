@@ -2,6 +2,7 @@
 # For licensing see accompanying LICENSE file.
 # Copyright (C) 2026 Apple Inc. All Rights Reserved.
 #
+import os
 from typing import NamedTuple
 
 import torch
@@ -59,6 +60,7 @@ def generate_unified(
     full_context: bool = False,
     confidences_top_p: int = 1,
     record_trajectory: bool = False,
+    setstate_remask_conf_prior: float = 0.0,
 ) -> GenerationResult:
     """
     If record_trajectory=True, GenerationResult.trajectory is a list of dicts, one per
@@ -201,6 +203,7 @@ def generate_unified(
                     temperature_policy,
                     generation_part=generation_part,
                     mask_id=mask_id,
+                    setstate_remask_conf_prior=setstate_remask_conf_prior,
                 )
                 sampling_history.append(sampling_data)
 
@@ -406,6 +409,7 @@ def _policy_unmask_decisions(
     temperature_policy: float = 1.0,
     generation_part: torch.Tensor | None = None,
     mask_id: int | None = None,
+    setstate_remask_conf_prior: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor | None, dict]:
     if sampling_mode == "three_way":
         return _policy_three_way_decisions(
@@ -424,6 +428,27 @@ def _policy_unmask_decisions(
             temperature_policy=temperature_policy,
             generation_part=generation_part,
             mask_id=mask_id,
+        )
+
+    if sampling_mode == "two_way_setstate":
+        from common.generation.two_way_setstate import _policy_two_way_setstate_decisions
+        return _policy_two_way_setstate_decisions(
+            mask_index=mask_index,
+            block_mask_index=block_mask_index,
+            probs=probs,
+            steps_taken=steps_taken,
+            block_slice=block_slice,
+            L=L,
+            policy=policy,
+            policy_type=policy_type,
+            full_context=full_context,
+            confidences_top_p=confidences_top_p,
+            model_output=model_output,
+            prompt_L=prompt_L,
+            temperature_policy=temperature_policy,
+            generation_part=generation_part,
+            mask_id=mask_id,
+            remask_conf_prior=setstate_remask_conf_prior,
         )
 
     policy_logits, _, sampling_mask, policy_inputs = _compute_policy_logits(
@@ -611,6 +636,13 @@ def _policy_three_way_decisions(
         outside, torch.full_like(constrained_logits[..., ACTION_REMASK], float("-inf")),
         constrained_logits[..., ACTION_REMASK],
     )
+
+    # Eval-only knob: forces the policy into 2-way behavior by zeroing the
+    # REMASK action's probability mass. Set DISABLE_REMASK=1 in the env to
+    # enable. Used to test whether a learned 3-way policy actually exploits
+    # REMASK or whether remasking is ornamental at inference time.
+    if os.environ.get("DISABLE_REMASK", "0") == "1":
+        constrained_logits[..., ACTION_REMASK] = float("-inf")
 
     actions = categorical_sample(constrained_logits, mask_index=sampling_mask)
     unmask = (actions == ACTION_UNMASK) & sampling_mask
