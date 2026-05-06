@@ -105,6 +105,7 @@ def evaluate(
     confidences_top_p=1,
     mask_id=126336,
     model_type=None,
+    setstate_remask_conf_prior=0.0,
 ):
     model.eval()
     total_processed = torch.tensor(0, device=model.device)
@@ -165,6 +166,7 @@ def evaluate(
                         "temperature_policy": temperature_policy,
                         "full_context": policy_full_context,
                         "confidences_top_p": confidences_top_p,
+                        "setstate_remask_conf_prior": setstate_remask_conf_prior,
                     }
                 )
             elif remasking == "fastdllm":
@@ -539,11 +541,19 @@ if __name__ == "__main__":
                 time_period=config.policy_time_period,
                 num_actions=config.num_policy_actions,
             ).to(device)
-        elif config.policy_type == "dit_confidence":
+        elif config.policy_type in ("dit_confidence", "dit_confidence_pcurrent"):
             hidden_dim = config.policy_hidden_dim or 128
             feedforward_dim = config.policy_feedforward_dim or (4 * hidden_dim)
 
-            policy_core = DiTConfidencePolicy(
+            if config.policy_type == "dit_confidence_pcurrent":
+                from common.models.policy_pcurrent import DiTConfidencePCurrentPolicy
+                _PolicyClass = DiTConfidencePCurrentPolicy
+                _extra_kwargs = {}
+            else:
+                _PolicyClass = DiTConfidencePolicy
+                _extra_kwargs = {}
+
+            policy_core = _PolicyClass(
                 hidden_dim=hidden_dim,
                 feedforward_dim=feedforward_dim,
                 num_heads=config.policy_num_heads,
@@ -554,11 +564,12 @@ if __name__ == "__main__":
                 num_blocks=config.policy_num_blocks,
                 time_period=config.policy_time_period,
                 num_actions=config.num_policy_actions,
+                **_extra_kwargs,
             ).to(device)
         else:
             raise ValueError(
                 f"Policy type {config.policy_type} not supported. "
-                "Choose from ['dit_hidden', 'dit_confidence']"
+                "Choose from ['dit_hidden', 'dit_confidence', 'dit_confidence_pcurrent']"
             )
         policy = PolicyHFWrapper(policy_core, config.policy_type)
 
@@ -626,6 +637,9 @@ if __name__ == "__main__":
         confidences_top_p=args.grpo_config.confidences_top_p
         if args.remasking == "policy"
         else 1,
+        setstate_remask_conf_prior=getattr(
+            args.grpo_config, "setstate_remask_conf_prior", 0.0
+        ),
     )
 
     if accelerator.num_processes > 1:

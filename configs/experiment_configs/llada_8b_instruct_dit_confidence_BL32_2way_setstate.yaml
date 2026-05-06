@@ -1,0 +1,100 @@
+# 2-way set-state policy: Bernoulli action over {set-state-masked, set-state-unmasked}
+# at every block position. Effect is state-dependent — see
+# common/generation/two_way_setstate.py for semantics.
+#
+# Compared to the 3-way config:
+#   - num_policy_actions: 1 (was 3) — Bernoulli, like upstream Apple 2-way
+#   - sampling_mode: two_way_setstate (was three_way)
+#   - policy_type: dit_confidence_pcurrent (was dit_confidence) — adds
+#     p(current_token) as a separate input feature with sinusoidal lift +
+#     learnable masked-position embedding. confidences_top_p stays at 1.
+#
+# Warmstart: point --warm_start_policy_path at any upstream 2-way ckpt
+# (e.g. pretrained_checkpoints/2way_ckpt1000.safetensors). The shared layers
+# load via strict=False; the ~2.3K new params (p_current_proj, masked_p_embedding)
+# are reported as missing keys and stay at fresh init.
+torch_dtype: bfloat16
+load_in_4bit: false
+model_path: GSAI-ML/LLaDA-8B-Instruct
+
+attn_implementation: sdpa
+
+dataset: gsm8k_and_math
+seed: 123
+bf16: false
+
+adam_beta1: 0.9
+adam_beta2: 0.99
+weight_decay: 0.1
+max_grad_norm: 0.2
+
+use_vllm: false
+vllm_device: auto
+vllm_gpu_memory_utilization: 0.9
+
+warmup_steps: 100
+logging_steps: 1
+learning_rate: 3e-5
+lr_scheduler_type: cosine
+reward_functions:
+  - mixed_correctness_mult_reward_func
+  - mixed_correctness_reward_func
+reward_weights:
+  - 1.0
+  - 0.0
+
+num_generations: 8
+num_train_epochs: 1
+
+per_device_eval_batch_size: 1
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 1
+
+gradient_checkpointing: false
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+
+resume_from_checkpoint: true
+
+save_steps: 50
+save_strategy: steps
+save_total_limit: 500
+
+max_completion_length: 256
+max_prompt_length: 200
+block_length: 32
+generation_batch_size: 8
+remasking: policy
+beta: 0.
+epsilon: 0.5
+num_iterations: 2
+loglikelihood_dtype: float32
+timestep_batch_size: 16
+
+# Policy specific
+policy_type: dit_confidence_pcurrent  # NEW: extends dit_confidence with p_current input
+policy_hidden_dim: 128
+policy_feedforward_dim: 512
+policy_num_heads: 2
+policy_num_blocks: 1
+policy_dropout: 0.0
+policy_time_embed_dim: 128
+policy_full_context: true
+policy_smart_init: -2.0
+
+# ===== 2-way set-state specific =====
+sampling_mode: two_way_setstate
+num_policy_actions: 1            # Bernoulli, same as upstream Apple 2-way
+confidences_top_p: 1             # unchanged: top-1 conf is its own channel
+alpha_compute_reward: 0.0
+alpha_correctness_reward: 1.0
+entropy_coef: 0.001              # match v8 — set 0 for the no-entropy ablation
+
+# Confidence-aware prior on the "go-to-masked" half-decision at unmasked
+# positions. Starts at 0 — we want to test whether the policy learns to remask
+# WITHOUT the prior pushing it away from high-conf tokens. v8's W&B data shows
+# remask rate stays at noise level under the strong (3-way) prior; running with
+# 0 here is the cleanest test that the prior, not the framework, was the cap.
+# Bump to 1.0 / 5.0 in a follow-up ablation if remask rate gets pathological.
+setstate_remask_conf_prior: 5.0
+

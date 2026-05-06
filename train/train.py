@@ -25,9 +25,11 @@ from common.config import Config
 from common.models.policy import DiTHiddenStatePolicy
 from common.models.policy import DiTConfidencePolicy
 from common.models.policy import PolicyHFWrapper
+from common.models.policy_pcurrent import DiTConfidencePCurrentPolicy
 from common.s3 import S3UploadCallback
 from common.s3 import download_s3_checkpoint
 from common.s3 import get_latest_s3_checkpoint
+from train.wandb_artifact_callback import WandbCheckpointArtifact
 from data.data_utils import get_gsm8k_and_math_and_kodcode_questions
 from data.data_utils import get_gsm8k_and_math_questions
 from data.data_utils import get_gsm8k_questions
@@ -217,10 +219,27 @@ def main(grpo_config, model_config):
             time_period=grpo_config.policy_time_period,
             num_actions=grpo_config.num_policy_actions,
         ).to(device)
+
+    elif grpo_config.policy_type == "dit_confidence_pcurrent":
+        hidden_dim = grpo_config.policy_hidden_dim or 128
+        feedforward_dim = grpo_config.policy_feedforward_dim or (4 * hidden_dim)
+
+        policy_core = DiTConfidencePCurrentPolicy(
+            hidden_dim=hidden_dim,
+            feedforward_dim=feedforward_dim,
+            num_heads=grpo_config.policy_num_heads,
+            dropout=grpo_config.policy_dropout,
+            time_embed_dim=grpo_config.policy_time_embed_dim,
+            smart_init=grpo_config.policy_smart_init,
+            confidences_top_p=grpo_config.confidences_top_p,
+            num_blocks=grpo_config.policy_num_blocks,
+            time_period=grpo_config.policy_time_period,
+            num_actions=grpo_config.num_policy_actions,
+        ).to(device)
     else:
         raise ValueError(
             f"Policy type {grpo_config.policy_type} not supported. "
-            "Choose from ['dit_hidden', 'dit_confidence']"
+            "Choose from ['dit_hidden', 'dit_confidence', 'dit_confidence_pcurrent']"
         )
 
     policy = PolicyHFWrapper(policy_core, grpo_config.policy_type)
@@ -273,6 +292,12 @@ def main(grpo_config, model_config):
         callbacks = []
         # Do however need to make sure that the local path exists!
         os.makedirs(output_dir, exist_ok=True)
+
+    # Push every saved checkpoint (model.safetensors + config.json only) to W&B
+    # as a versioned artifact. Lets teammates pull a run's weights from any
+    # machine without scp-ing from the trainer's VM.
+    if os.environ.get("WANDB_DISABLED", "false").lower() != "true":
+        callbacks.append(WandbCheckpointArtifact(run_name=grpo_config.run_name))
 
     with context_manager as local_output_dir:
         grpo_config.output_dir = local_output_dir
