@@ -1,0 +1,8 @@
+{
+  "architectures": [
+    "PolicyHFWrapper"
+  ],
+  "model_type": "policy",
+  "torch_dtype": "float32",
+  "transformers_version": "4.53.0"
+}

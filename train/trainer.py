@@ -489,7 +489,9 @@ class Trainer(GRPOTrainer):
 
         # 1. Confidence-aware REMASK prior (only for dit_confidence path).
         # policy_inputs[1] for dit_confidence is c_max_input shape (B, T, L, top_p).
-        REMASK_CONF_PRIOR = 5.0
+        # Whatever signal was fed at sampling time (top-1 or committed-token prob)
+        # is what's stored here, so we just use slot 0 directly to stay consistent.
+        REMASK_CONF_PRIOR = float(getattr(self.args, "remask_conf_prior_strength", 5.0))
         c_input = policy_inputs[1] if len(policy_inputs) >= 2 else None
         if (
             isinstance(c_input, torch.Tensor)
@@ -549,6 +551,10 @@ class Trainer(GRPOTrainer):
         late_active = torch.zeros(1, device=num_steps.device)
         remask_conf_sum = torch.zeros(1, device=num_steps.device)
         remask_conf_count = torch.zeros(1, device=num_steps.device)
+        all_conf_sum = torch.zeros(1, device=num_steps.device)
+        all_conf_count = torch.zeros(1, device=num_steps.device)
+        unmask_conf_sum = torch.zeros(1, device=num_steps.device)
+        unmask_conf_count = torch.zeros(1, device=num_steps.device)
 
         for i in range(
             len(policy_outputs_all) - (1 if self.args.es_thresholds else 0)
@@ -580,18 +586,36 @@ class Trainer(GRPOTrainer):
             late_remask += (remask_mask & late_buk).float().sum()
             late_active += (active & late_buk).float().sum()
 
-            # Mean confidence of remasked tokens (uses policy confidence input if present).
-            # For dit_confidence policy, policy_inputs is (mask, c_input (B, T, L, topp), time).
-            # For dit_hidden we skip this metric.
+            # Confidence-input statistics: mean of c_input slot 0 across positions.
+            # For dit_confidence: c_input slot 0 is whichever conf signal was used at
+            # sampling time — top-1 prob (default) or p(committed_token) at unmasked
+            # positions (use_committed_token_conf=True).
+            #
+            # We log:
+            #   - remask_conf_mean: avg signal at REMASKED positions
+            #     (with committed-conf signal: avg p(committed) at remasks; should be LOW
+            #     if the policy is correctly targeting wrong commits)
+            #   - all_conf_mean: avg signal at all ACTIVE positions
+            #     (baseline for comparison)
+            #   - unmask_action_conf_mean: avg signal at positions sampled UNMASK
+            #     (only ever masked positions, so this equals top-1 prob there)
             if len(policy_inputs) >= 2 and isinstance(policy_inputs[1], torch.Tensor):
                 c_input = policy_inputs[1]
                 if c_input.dim() == 4 and c_input.shape[-1] >= 1:
                     c_top1 = c_input[..., 0]  # (B, T, L)
                     if c_top1.shape == samples.shape:
-                        sel = remask_mask
-                        if sel.any():
-                            remask_conf_sum += c_top1[sel].float().sum()
-                            remask_conf_count += sel.float().sum()
+                        sel_remask = remask_mask
+                        if sel_remask.any():
+                            remask_conf_sum += c_top1[sel_remask].float().sum()
+                            remask_conf_count += sel_remask.float().sum()
+                        sel_active = active
+                        if sel_active.any():
+                            all_conf_sum += c_top1[sel_active].float().sum()
+                            all_conf_count += sel_active.float().sum()
+                        sel_unmask = (samples == ACTION_UNMASK) & active
+                        if sel_unmask.any():
+                            unmask_conf_sum += c_top1[sel_unmask].float().sum()
+                            unmask_conf_count += sel_unmask.float().sum()
 
         def _safe_div(n, d):
             return (n / d.clamp(min=1.0)).item()
@@ -616,6 +640,14 @@ class Trainer(GRPOTrainer):
         if remask_conf_count.item() > 0:
             self._metrics[mode]["remask_conf_mean"].append(
                 _safe_div(remask_conf_sum, remask_conf_count)
+            )
+        if all_conf_count.item() > 0:
+            self._metrics[mode]["all_conf_mean"].append(
+                _safe_div(all_conf_sum, all_conf_count)
+            )
+        if unmask_conf_count.item() > 0:
+            self._metrics[mode]["unmask_action_conf_mean"].append(
+                _safe_div(unmask_conf_sum, unmask_conf_count)
             )
 
         # NFE stats (shared with 2-way block below, but we log here for 3-way).
@@ -758,6 +790,12 @@ class Trainer(GRPOTrainer):
                         confidences_top_p=self.args.confidences_top_p,
                         model_type=self.args.model_type,
                         attention_mask=batch_prompt_mask,
+                        use_committed_token_conf=getattr(
+                            self.args, "use_committed_token_conf", False
+                        ),
+                        remask_conf_prior_strength=getattr(
+                            self.args, "remask_conf_prior_strength", 5.0
+                        ),
                     )
 
                     # Extract values from NamedTuple

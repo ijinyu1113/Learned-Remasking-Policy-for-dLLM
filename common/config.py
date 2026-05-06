@@ -180,6 +180,28 @@ class Config(GRPOConfig):
         },
     )
 
+    use_committed_token_conf: bool = field(
+        default=False,
+        metadata={
+            "help": "3-way policy input fix. If True, at unmasked positions the policy's "
+            "confidence input slot 0 is set to probs[i, committed_token] (the base model's "
+            "agreement with the currently-committed token) instead of the top-1 probability. "
+            "This is the correct signal for 'should I remask this position?' — low values "
+            "mean the model thinks the commit is wrong. Default False reproduces the "
+            "original Jazbec behavior (top-1 prob at all positions)."
+        },
+    )
+
+    remask_conf_prior_strength: float = field(
+        default=5.0,
+        metadata={
+            "help": "Coefficient on the conf-aware REMASK prior. The prior subtracts "
+            "remask_conf_prior_strength * conf_signal from the REMASK logit at sampling "
+            "time. Higher = more suppression of remasking. Default 5.0; reduce (e.g. to "
+            "2.0) when use_committed_token_conf=True since the signal is more informative."
+        },
+    )
+
     dpls_stop_logit: float = field(
         default=0.0,
         metadata={

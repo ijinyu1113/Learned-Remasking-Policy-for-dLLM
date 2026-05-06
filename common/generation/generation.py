@@ -59,6 +59,8 @@ def generate_unified(
     full_context: bool = False,
     confidences_top_p: int = 1,
     record_trajectory: bool = False,
+    use_committed_token_conf: bool = False,
+    remask_conf_prior_strength: float = 5.0,
 ) -> GenerationResult:
     """
     If record_trajectory=True, GenerationResult.trajectory is a list of dicts, one per
@@ -201,6 +203,8 @@ def generate_unified(
                     temperature_policy,
                     generation_part=generation_part,
                     mask_id=mask_id,
+                    use_committed_token_conf=use_committed_token_conf,
+                    remask_conf_prior_strength=remask_conf_prior_strength,
                 )
                 sampling_history.append(sampling_data)
 
@@ -406,6 +410,8 @@ def _policy_unmask_decisions(
     temperature_policy: float = 1.0,
     generation_part: torch.Tensor | None = None,
     mask_id: int | None = None,
+    use_committed_token_conf: bool = False,
+    remask_conf_prior_strength: float = 5.0,
 ) -> tuple[torch.Tensor, torch.Tensor | None, dict]:
     if sampling_mode == "three_way":
         return _policy_three_way_decisions(
@@ -424,6 +430,8 @@ def _policy_unmask_decisions(
             temperature_policy=temperature_policy,
             generation_part=generation_part,
             mask_id=mask_id,
+            use_committed_token_conf=use_committed_token_conf,
+            remask_conf_prior_strength=remask_conf_prior_strength,
         )
 
     policy_logits, _, sampling_mask, policy_inputs = _compute_policy_logits(
@@ -504,12 +512,23 @@ def _policy_three_way_decisions(
     temperature_policy: float,
     generation_part: torch.Tensor,
     mask_id: int,
+    use_committed_token_conf: bool = False,
+    remask_conf_prior_strength: float = 5.0,
 ) -> tuple[torch.Tensor, torch.Tensor, dict]:
     """3-way (unmask/keep/remask) policy decision path.
 
     The sampling_mask here spans ALL in-block positions (masked and unmasked) — the policy
     can act on already-revealed tokens too. Invalid (action, position) pairs get -inf
     logits so the categorical distribution is automatically constrained.
+
+    :param use_committed_token_conf: if True, at unmasked positions the policy's
+        confidence input slot 0 is set to ``probs[i, committed_token]`` (i.e., the base
+        model's *agreement* with the currently-committed token) instead of the top-1
+        probability. The conf prior on REMASK uses the same signal. This is the right
+        signal for "should I remask this position?" — low values mean the model thinks
+        the commit is wrong. Default False reproduces the original Jazbec behavior.
+    :param remask_conf_prior_strength: coefficient applied to the conf prior that
+        suppresses remasking at confidently-correct positions. Higher = more suppression.
     """
     B, L_full = probs.shape[0], probs.shape[1]
     # sampling_mask: all positions in the current block (so the policy can
@@ -527,11 +546,33 @@ def _policy_three_way_decisions(
     # where L_policy is L if full_context else BL.
     per_batch_timestep = steps_taken.unsqueeze(-1) * (1 / L)
     topk_result = probs.topk(confidences_top_p, dim=-1)
+
+    # Decide what value to feed the policy's confidence input at unmasked positions.
+    # Default: top-1 probability everywhere (the original Jazbec signal).
+    # If use_committed_token_conf=True: at unmasked positions, use probs[i, committed_token]
+    # (the base model's agreement with the currently-committed token) — directly informative
+    # for remask decisions. At masked positions still use top-1 (the only meaningful signal
+    # there since there's no committed token yet).
+    is_masked_full = (generation_part == mask_id)  # (B, L_full)
+    if use_committed_token_conf:
+        # gather requires non-negative indices; clamp masked positions (their value
+        # gets overwritten by the where below).
+        committed_prob_full = probs.gather(
+            -1, generation_part.clamp(min=0).unsqueeze(-1)
+        )  # (B, L_full, 1)
+        # Override slot 0 of the topk values at unmasked positions with committed-prob.
+        c_full_input = topk_result.values.clone()
+        c_full_input[..., 0] = torch.where(
+            is_masked_full, c_full_input[..., 0], committed_prob_full.squeeze(-1)
+        )
+    else:
+        c_full_input = topk_result.values
+
     if full_context:
-        c_max_input = topk_result.values
+        c_max_input = c_full_input
         policy_mask = mask_index  # policy's "what-is-masked" input sees full sequence
     else:
-        c_max_input = topk_result.values[:, block_slice]
+        c_max_input = c_full_input[:, block_slice]
         policy_mask = block_mask_index
 
     if policy_type == "dit_hidden":
@@ -578,18 +619,24 @@ def _policy_three_way_decisions(
     constrained_logits = policy_logits_full.clone()
 
     # Confidence-aware REMASK prior: suppress remasking of tokens that the base
-    # model is confident about. At an unmasked position, we add -REMASK_CONF_PRIOR
-    # * (top-1 confidence) to the REMASK logit. A token with conf=1.0 gets its
-    # remask logit shifted down by REMASK_CONF_PRIOR; a token with conf=0 is
-    # unaffected. This is a structural prior that encodes the assumption
-    # "high base-model confidence => token is likely correct => don't throw it
-    # away." The policy can still learn to override this prior via its own
-    # features; this just stops a randomly-initialized remask head from
-    # indiscriminately destroying coherent outputs before reward signal arrives.
-    REMASK_CONF_PRIOR = 5.0
-    conf_max_full = probs.max(dim=-1).values  # (B, L_full) model top-1 confidence
+    # model agrees are correct. At an unmasked position, we subtract
+    # remask_conf_prior_strength * (signal) from the REMASK logit. The signal:
+    #   - if use_committed_token_conf: probs[i, committed_token] -- the model's
+    #     agreement with the currently-committed token. LOW value (model thinks
+    #     commit is wrong) → small subtraction → REMASK more likely.
+    #   - else: top-1 probability (original Jazbec signal). HIGH value (peaked
+    #     distribution) → large subtraction → REMASK less likely. But this is
+    #     not aligned with "is the commit wrong" — it's the v6 implementation.
+    # REMASK is action-masked to -inf at masked positions later, so the prior's
+    # value at masked positions does not affect any sampled action.
+    if use_committed_token_conf:
+        conf_for_prior = probs.gather(
+            -1, generation_part.clamp(min=0).unsqueeze(-1)
+        ).squeeze(-1)  # (B, L_full) p(committed_token at i)
+    else:
+        conf_for_prior = probs.max(dim=-1).values  # (B, L_full) top-1 prob
     constrained_logits[..., ACTION_REMASK] = (
-        constrained_logits[..., ACTION_REMASK] - REMASK_CONF_PRIOR * conf_max_full
+        constrained_logits[..., ACTION_REMASK] - remask_conf_prior_strength * conf_for_prior
     )
     # At masked positions, REMASK invalid
     constrained_logits[..., ACTION_REMASK] = torch.where(

@@ -225,3 +225,64 @@ Overlap on writing. Everyone should understand the full pipeline.
 - **LoRA on the base model**: Jointly train the policy + LoRA adapter on LLaDA. This would let the base model's token predictions also improve, bridging the gap to RemeDi without the full dual-stream cost.
 - **Transfer experiments**: Train policy on GSM8K, test on MATH/code without retraining. Does remasking transfer better or worse than unmasking-only?
 - **Process reward**: Instead of outcome-only reward, add per-step reward based on how many "correct" tokens are unmasked at each step (requires ground truth, so only works on training set). Compare convergence speed.
+
+
+
+##NEW
+The bug was in how the PPO importance ratio was being computed for the 3-way action space.
+
+What PPO does
+GRPO (and PPO in general) updates the policy using this ratio:
+
+$$r(\theta) = \frac{\pi_{\text{new}}(a | s)}{\pi_{\text{old}}(a | s)}$$
+
+where:
+
+$\pi_{\text{old}}$ is the policy at rollout time (when actions were sampled)
+$\pi_{\text{new}}$ is the current (slightly updated) policy at the gradient step
+If the policy hasn't changed at all between rollout and update, $r = 1$. If the policy has shifted toward the sampled action, $r > 1$. The ratio multiplied by advantage is the gradient signal: "amplify good actions, dampen bad ones."
+
+The setup that broke it
+For 3-way, before sampling, I take the raw policy logits and apply two adjustments:
+
+Action validity — set REMASK to $-\infty$ at masked positions, UNMASK to $-\infty$ at unmasked positions
+Confidence prior — subtract $5 \times \text{conf}$ from REMASK logit at unmasked positions
+These produce constrained logits. The categorical sampling and OLD log-prob both use constrained logits.
+
+Where the bug lived
+When computing the NEW log-prob during training, the trainer called:
+
+
+logits = model(*policy_inputs)        # raw logits, no constraints
+lls = categorical_batch_loglik(samples, utilities=logits, ...)
+It used raw logits. The constraints were never applied at training time.
+
+So you had:
+
+$\log P_{\text{old}}(a) = \text{logit}a - \log\sum{a'} \exp(\text{logit}_{a'}^{\text{constrained}})$
+$\log P_{\text{new}}(a) = \text{logit}a - \log\sum{a'} \exp(\text{logit}_{a'}^{\text{raw}})$
+The numerators (the logit of the sampled action) are the same. But the denominators differ — the constrained denominator excludes invalid actions (which contribute $\exp(-\infty) = 0$) while the raw denominator includes them.
+
+What the bug actually computed
+$$\log P_{\text{new}} - \log P_{\text{old}} = \log\sum \exp(\text{constrained}) - \log\sum \exp(\text{raw})$$
+
+This difference is always negative (constrained sum ≤ raw sum, because constraints only zero out terms). Even when the policy parameters were unchanged, the ratio $r = \exp(\text{negative number}) < 1$.
+
+So GRPO was telling the policy "you've moved AWAY from the sampled action" on every step, regardless of whether you actually had. With advantage > 0 (good rollouts), $r \cdot A < A$ → loss appears better than it should → tiny update. With advantage < 0 (bad rollouts), $r \cdot A > A$ (less negative, since both negative) → larger penalty than warranted on those actions.
+
+Why it killed REMASK specifically
+REMASK actions sit on the dimension that gets the largest constraint adjustment (-inf at all masked positions, plus the -5×conf prior). So $\log P_{\text{new}} - \log P_{\text{old}}$ was MOST negative on REMASK actions. GRPO interpreted this as "REMASK actions consistently move the policy away from them" → suppressed REMASK harder than warranted → REMASK probability collapsed to near-zero (you saw 0.00017 → 0.00001 over 100 steps).
+
+The fix
+Apply the SAME constraints to the new logits in _get_per_timestep_logps_block before computing log-prob:
+
+
+constrained_logits = self._apply_three_way_constraints(logits, policy_inputs, sampling_masks)
+lls = categorical_batch_loglik(samples, utilities=constrained_logits, ...)
+The constraints depend only on the rollout state (which positions were masked, what LLaDA's confidence was), not on the policy parameters. So they have zero gradient — the gradient flows through logits as before. But the softmax denominator now matches what was used at sampling time, so the ratio is unbiased.
+
+Why I missed it initially
+The cold-start runs (v2-v6) had reward stuck at zero, so I attributed the failure to "exploration collapse" / "thrashing" — both real problems but downstream symptoms. The bug only became diagnostic when v7 with warm-start put a functional policy in (74% accuracy at step 0) and then immediately degraded it — which only happens if gradients are wrong, not if exploration is failing.
+
+Why it didn't break 2-way
+2-way uses Bernoulli (one logit per position, sigmoid → independent flip per position). There's no softmax over multiple actions, so no denominator coupling, so no constraint mismatch can arise. The bug is specific to the 3-way categorical formulation.
