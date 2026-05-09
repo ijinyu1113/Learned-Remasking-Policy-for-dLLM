@@ -252,11 +252,14 @@ def main():
     json_records = []
 
     for prob_idx, ds_i in enumerate(indices):
-        sample = ds[ds_i]
-        prompt_text = sample.get("prompts") or sample.get("question") or ""
-        gt = sample["answers"] if "answers" in sample else sample["answer"]
-        prompt_ids = sample["input_ids"].unsqueeze(0).to(device)
-        attn_mask = sample["attention_mask"].bool().unsqueeze(0).to(device)
+        # GSM8KDataset.__getitem__ returns (prompt, question, answer) tuple.
+        # Use the dataset's collate_fn to tokenize and produce tensors consistently.
+        raw = ds[ds_i]
+        batch = ds.collate_fn([raw])
+        prompt_text = batch["questions"][0]  # human-readable question text
+        gt = batch["answers"][0]
+        prompt_ids = batch["input_ids"].to(device)
+        attn_mask = batch["attention_mask"].bool().to(device)
         prompt_L = prompt_ids.shape[1]
 
         print(f"\n=== Problem {prob_idx+1}/{len(indices)} (dataset idx {ds_i}) ===")
